@@ -217,6 +217,7 @@ extern GroupingSetsPath *create_groupingsets_path(PlannerInfo *root,
 						 Path *subpath,
 						 List *having_qual,
 						 AggStrategy aggstrategy,
+						 AggSplit aggsplit,
 						 List *rollups,
 						 const AggClauseCosts *agg_costs,
 						 double numGroups);

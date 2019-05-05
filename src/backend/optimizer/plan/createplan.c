@@ -2154,7 +2154,7 @@ create_groupingsets_plan(PlannerInfo *root, GroupingSetsPath *best_path)
 	 * never be grouping in an UPDATE/DELETE; but let's Assert that.
 	 */
 	Assert(root->inhTargetKind == INHKIND_NONE);
-	Assert(root->grouping_map == NULL);
+//	Assert(root->grouping_map == NULL);
 	root->grouping_map = grouping_map;
 
 	/*
@@ -2200,7 +2200,7 @@ create_groupingsets_plan(PlannerInfo *root, GroupingSetsPath *best_path)
 			agg_plan = (Plan *) make_agg(NIL,
 										 NIL,
 										 strat,
-										 AGGSPLIT_SIMPLE,
+										 best_path->aggsplit,
 										 list_length((List *) linitial(rollup->gsets)),
 										 new_grpColIdx,
 										 extract_grouping_ops(rollup->groupClause),
@@ -2238,7 +2238,7 @@ create_groupingsets_plan(PlannerInfo *root, GroupingSetsPath *best_path)
 		plan = make_agg(build_path_tlist(root, &best_path->path),
 						best_path->qual,
 						best_path->aggstrategy,
-						AGGSPLIT_SIMPLE,
+						best_path->aggsplit,
 						numGroupCols,
 						top_grpColIdx,
 						extract_grouping_ops(rollup->groupClause),
