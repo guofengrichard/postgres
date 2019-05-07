@@ -6517,6 +6517,7 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 													 -1.0);
 				}
 
+#if 0
 				/* WIP: parallel grouping sets */
 				if (parse->groupingSets)
 				{
@@ -6524,7 +6525,8 @@ add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
 												path, true, can_hash,
 												gd, agg_final_costs, dNumGroups, false, AGGSPLIT_FINAL_DESERIAL);
 				}
-				else if (parse->hasAggs)
+#endif
+				if (parse->hasAggs)
 					add_path(grouped_rel, (Path *)
 							 create_agg_path(root,
 											 grouped_rel,
@@ -6918,17 +6920,27 @@ create_partial_grouping_paths(PlannerInfo *root,
 		if (hashaggtablesize < work_mem * 1024L &&
 			cheapest_partial_path != NULL)
 		{
-			add_partial_path(partially_grouped_rel, (Path *)
-							 create_agg_path(root,
-											 partially_grouped_rel,
-											 cheapest_partial_path,
-											 partially_grouped_rel->reltarget,
-											 AGG_HASHED,
-											 AGGSPLIT_INITIAL_SERIAL,
-											 parse->groupClause,
-											 NIL,
-											 agg_partial_costs,
-											 dNumPartialPartialGroups));
+				/* WIP: parallel grouping sets */
+				if (parse->groupingSets)
+				{
+					consider_groupingsets_paths(root, partially_grouped_rel,
+												cheapest_partial_path, false, true,
+												gd, agg_partial_costs, dNumPartialGroups, true, AGGSPLIT_INITIAL_SERIAL);
+				}
+				else
+				{
+					add_partial_path(partially_grouped_rel, (Path *)
+									 create_agg_path(root,
+													 partially_grouped_rel,
+													 cheapest_partial_path,
+													 partially_grouped_rel->reltarget,
+													 AGG_HASHED,
+													 AGGSPLIT_INITIAL_SERIAL,
+													 parse->groupClause,
+													 NIL,
+													 agg_partial_costs,
+													 dNumPartialPartialGroups));
+				}
 		}
 	}
 
