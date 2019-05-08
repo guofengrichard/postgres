@@ -366,6 +366,14 @@ _readGroupingSet(void)
 	READ_DONE();
 }
 
+static GroupId *
+_readGroupId(void)
+{
+	    READ_LOCALS_NO_FIELDS(GroupId);
+
+		    READ_DONE();
+}
+
 /*
  * _readWindowClause
  */
@@ -2808,6 +2816,8 @@ parseNodeString(void)
 		return_value = _readPartitionBoundSpec();
 	else if (MATCH("PARTITIONRANGEDATUM", 19))
 		return_value = _readPartitionRangeDatum();
+	else if (MATCH("GROUPID", 7))
+		return_value = _readGroupId();
 	else
 	{
 		elog(ERROR, "badly formatted node string \"%.32s\"...", token);

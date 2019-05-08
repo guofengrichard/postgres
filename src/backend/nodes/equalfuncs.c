@@ -2899,6 +2899,12 @@ _equalPartitionCmd(const PartitionCmd *a, const PartitionCmd *b)
 	return true;
 }
 
+static bool
+_equalGroupId(const GroupId *a __attribute__((unused)), const GroupId *b __attribute__((unused)))
+{
+	    return true;
+}
+
 /*
  * Stuff from pg_list.h
  */
@@ -3714,6 +3720,9 @@ equal(const void *a, const void *b)
 			break;
 		case T_PartitionCmd:
 			retval = _equalPartitionCmd(a, b);
+			break;
+		case T_GroupId:
+			retval = _equalGroupId(a, b);
 			break;
 
 		default:

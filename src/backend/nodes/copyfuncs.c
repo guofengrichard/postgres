@@ -1887,6 +1887,14 @@ _copyArrayExpr(const ArrayExpr *from)
 	return newnode;
 }
 
+static GroupId *
+_copyGroupId(const GroupId *from)
+{
+	GroupId *newnode = makeNode(GroupId);
+
+	return newnode;
+}
+
 /*
  * _copyRowExpr
  */
@@ -5664,6 +5672,9 @@ copyObjectImpl(const void *from)
 			 */
 		case T_ForeignKeyCacheInfo:
 			retval = _copyForeignKeyCacheInfo(from);
+			break;
+		case T_GroupId:
+			retval = _copyGroupId(from);
 			break;
 
 		default:

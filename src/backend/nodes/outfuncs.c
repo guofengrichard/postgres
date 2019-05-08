@@ -3613,6 +3613,12 @@ _outPartitionRangeDatum(StringInfo str, const PartitionRangeDatum *node)
 	WRITE_LOCATION_FIELD(location);
 }
 
+static void
+_outGroupId(StringInfo str, const GroupId *node __attribute__((unused)))
+{
+	    WRITE_NODE_TYPE("GROUPID");
+}
+
 /*
  * outNode -
  *	  converts a Node into ascii string and append it to 'str'
@@ -4272,6 +4278,9 @@ outNode(StringInfo str, const void *obj)
 				break;
 			case T_PartitionRangeDatum:
 				_outPartitionRangeDatum(str, obj);
+				break;
+			case T_GroupId:
+				_outGroupId(str, obj);
 				break;
 
 			default:

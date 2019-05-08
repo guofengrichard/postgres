@@ -395,6 +395,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_AGG_PLAIN_TRANS,
 		&&CASE_EEOP_AGG_ORDERED_TRANS_DATUM,
 		&&CASE_EEOP_AGG_ORDERED_TRANS_TUPLE,
+		&&CASE_EEOP_GROUP_ID,
 		&&CASE_EEOP_LAST
 	};
 
@@ -1731,6 +1732,16 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		{
 			/* too complex for an inline implementation */
 			ExecEvalAggOrderedTransTuple(state, op, econtext);
+
+			EEO_NEXT();
+		}
+		EEO_CASE(EEOP_GROUP_ID)
+		{
+			/*
+			 *
+			 */
+			*op->resvalue = Int32GetDatum(econtext->group_id);
+			*op->resnull = false;
 
 			EEO_NEXT();
 		}

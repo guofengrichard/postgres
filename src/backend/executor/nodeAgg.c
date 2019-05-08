@@ -1883,6 +1883,7 @@ agg_retrieve_direct(AggState *aggstate)
 		Assert(aggstate->projected_set >= 0);
 
 		currentSet = aggstate->projected_set;
+		econtext->group_id = currentSet;
 
 		prepare_projection_slot(aggstate, econtext->ecxt_outertuple, currentSet);
 
@@ -1897,6 +1898,12 @@ agg_retrieve_direct(AggState *aggstate)
 		 * than returning a null since there might be more groups.
 		 */
 		result = project_aggregates(aggstate);
+
+		elog(WARNING,"%d\t%d\t%d\t%d", DatumGetInt32(result->tts_values[0]),
+				DatumGetInt32(result->tts_values[1]),
+				DatumGetInt32(result->tts_values[2]),
+				DatumGetInt32(result->tts_values[3]));
+
 		if (result)
 			return result;
 	}

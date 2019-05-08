@@ -8999,6 +8999,10 @@ get_rule_expr(Node *node, deparse_context *context,
 			get_tablefunc((TableFunc *) node, context, showimplicit);
 			break;
 
+        case T_GroupId:
+            appendStringInfo(buf, "group_id()");
+            break;
+
 		default:
 			elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node));
 			break;

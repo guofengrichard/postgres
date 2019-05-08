@@ -259,6 +259,9 @@ exprType(const Node *expr)
 		case T_PlaceHolderVar:
 			type = exprType((Node *) ((const PlaceHolderVar *) expr)->phexpr);
 			break;
+		case T_GroupId:
+			type = INT4OID;
+			break;
 		default:
 			elog(ERROR, "unrecognized node type: %d", (int) nodeTag(expr));
 			type = InvalidOid;	/* keep compiler quiet */
@@ -906,6 +909,9 @@ exprCollation(const Node *expr)
 			break;
 		case T_PlaceHolderVar:
 			coll = exprCollation((Node *) ((const PlaceHolderVar *) expr)->phexpr);
+			break;
+		case T_GroupId:
+			coll = InvalidOid;
 			break;
 		default:
 			elog(ERROR, "unrecognized node type: %d", (int) nodeTag(expr));
@@ -2247,6 +2253,11 @@ expression_tree_walker(Node *node,
 					return true;
 			}
 			break;
+		case T_GroupId:
+			{
+				// do nothing
+			}
+			break;
 		default:
 			elog(ERROR, "unrecognized node type: %d",
 				 (int) nodeTag(node));
@@ -3099,6 +3110,15 @@ expression_tree_mutator(Node *node,
 				return (Node *) newnode;
 			}
 			break;
+		case T_GroupId:
+            {
+                GroupId *grpid = (GroupId *) node;
+                GroupId *newnode;
+
+                FLATCOPY(newnode, grpid, GroupId);
+                return (Node *) newnode;
+            }
+            break;
 		default:
 			elog(ERROR, "unrecognized node type: %d",
 				 (int) nodeTag(node));

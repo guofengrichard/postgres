@@ -284,6 +284,8 @@ CreateExprContext(EState *estate)
 	econtext->ecxt_estate = estate;
 
 	econtext->ecxt_callbacks = NULL;
+	
+	econtext->group_id = 59;
 
 	/*
 	 * Link the ExprContext into the EState to ensure it is shut down when the

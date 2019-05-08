@@ -316,6 +316,14 @@ typedef struct Aggref
 } Aggref;
 
 /*
+ * WIP: parallel grouping sets
+ */
+typedef struct GroupId
+{
+	Expr      xpr;
+} GroupId;
+
+/*
  * GroupingFunc
  *
  * A GroupingFunc is a GROUPING(...) expression, which behaves in many ways

@@ -231,6 +231,7 @@ typedef enum ExprEvalOp
 	EEOP_AGG_PLAIN_TRANS,
 	EEOP_AGG_ORDERED_TRANS_DATUM,
 	EEOP_AGG_ORDERED_TRANS_TUPLE,
+	EEOP_GROUP_ID,
 
 	/* non-existent operation, used e.g. to check array lengths */
 	EEOP_LAST
@@ -654,6 +655,14 @@ typedef struct ExprEvalStep
 			int			transno;
 			int			setoff;
 		}			agg_trans;
+
+#if 0
+		struct
+		{
+			int			group_id;	/* target instruction's index */
+		}			groupid;
+#endif
+
 	}			d;
 } ExprEvalStep;
 

@@ -80,6 +80,8 @@ static void ExecBuildAggTransCall(ExprState *state, AggState *aggstate,
 					  FunctionCallInfo fcinfo, AggStatePerTrans pertrans,
 					  int transno, int setno, int setoff, bool ishash);
 
+static Datum ExecEvalGroupId(ExprState *gstate, ExprContext *econtext,
+                bool *isNull);
 
 /*
  * ExecInitExpr: prepare an expression tree for execution
@@ -2106,6 +2108,14 @@ ExecInitExprRec(Expr *node, ExprState *state,
 				break;
 			}
 
+		case T_GroupId:
+            {
+				scratch.opcode = EEOP_GROUP_ID;
+
+				ExprEvalPushStep(state, &scratch);
+				break;
+            }
+
 		default:
 			elog(ERROR, "unrecognized node type: %d",
 				 (int) nodeTag(node));
@@ -3452,4 +3462,13 @@ ExecBuildGroupingEqual(TupleDesc ldesc, TupleDesc rdesc,
 	ExecReadyExpr(state);
 
 	return state;
+}
+
+static Datum
+ExecEvalGroupId(ExprState *gstate, ExprContext *econtext,
+                bool *isNull)
+{
+	elog(WARNING, "group_id:%d", econtext->group_id);
+    *isNull = false;
+    return UInt32GetDatum(econtext->group_id);
 }

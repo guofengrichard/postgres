@@ -288,6 +288,8 @@ static ModifyTable *make_modifytable(PlannerInfo *root,
 static GatherMerge *create_gather_merge_plan(PlannerInfo *root,
 						 GatherMergePath *best_path);
 
+static List *add_grouping_groupid(List *tlist);
+
 
 /*
  * create_plan
@@ -745,6 +747,31 @@ create_scan_plan(PlannerInfo *root, Path *best_path, int flags)
 		plan = create_gating_plan(root, best_path, plan, gating_clauses);
 
 	return plan;
+}
+
+static List *
+add_grouping_groupid(List *tlist)
+{
+    TargetEntry *tle;
+    GroupId *grpid;
+
+    if (list_length(tlist) >= 1)
+    {
+        TargetEntry *te1;
+        te1 = get_tle_by_resno(tlist, list_length(tlist));
+
+        Assert (te1->expr != NULL);
+        if (IsA(te1->expr, GroupId))
+            return tlist;
+    }
+
+    grpid = makeNode(GroupId);
+    tle = makeTargetEntry((Expr *)grpid, list_length(tlist) + 1,
+                          "group_id", true);
+    tle->ressortgroupref = assignSortGroupRef(tle, tlist);
+    tlist = lappend(tlist, tle);
+
+    return tlist;
 }
 
 /*
@@ -1701,6 +1728,7 @@ create_gather_merge_plan(PlannerInfo *root, GatherMergePath *best_path)
 	Plan	   *subplan;
 	List	   *pathkeys = best_path->path.pathkeys;
 	List	   *tlist = build_path_tlist(root, &best_path->path);
+	tlist = add_grouping_groupid(tlist);
 
 	/* As with Gather, it's best to project away columns in the workers. */
 	subplan = create_plan_recurse(root, best_path->subpath, CP_EXACT_TLIST);
@@ -2230,12 +2258,16 @@ create_groupingsets_plan(PlannerInfo *root, GroupingSetsPath *best_path)
 		RollupData *rollup = linitial(rollups);
 		AttrNumber *top_grpColIdx;
 		int			numGroupCols;
+		List *tlist;
 
 		top_grpColIdx = remap_groupColIdx(root, rollup->groupClause);
 
 		numGroupCols = list_length((List *) linitial(rollup->gsets));
 
-		plan = make_agg(build_path_tlist(root, &best_path->path),
+		tlist = build_path_tlist(root, &best_path->path);
+		if (best_path->aggsplit == AGGSPLIT_INITIAL_SERIAL)
+			tlist = add_grouping_groupid(tlist);
+		plan = make_agg(tlist,
 						best_path->qual,
 						best_path->aggstrategy,
 						best_path->aggsplit,
