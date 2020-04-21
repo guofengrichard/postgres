@@ -133,6 +133,7 @@ static void inheritance_planner(PlannerInfo *root);
 static void grouping_planner(PlannerInfo *root, bool inheritance_update,
 							 double tuple_fraction);
 static grouping_sets_data *preprocess_grouping_sets(PlannerInfo *root);
+static List *reduce_grouping_sets(PlannerInfo *root, List *groupingSets);
 static List *remap_to_groupclause_idx(List *groupClause, List *gsets,
 									  int *tleref_to_colnum_map);
 static void preprocess_rowmarks(PlannerInfo *root);
@@ -2446,6 +2447,9 @@ preprocess_grouping_sets(PlannerInfo *root)
 
 	parse->groupingSets = expand_grouping_sets(parse->groupingSets, -1);
 
+	if (enable_reduce_grouping)
+		parse->groupingSets = reduce_grouping_sets(root, parse->groupingSets);
+
 	gd->any_hashable = false;
 	gd->unhashable_refs = NULL;
 	gd->unsortable_refs = NULL;
@@ -2603,6 +2607,50 @@ preprocess_grouping_sets(PlannerInfo *root)
 	}
 
 	return gd;
+}
+
+/*
+ *
+ */
+static List *
+reduce_grouping_sets(PlannerInfo *root, List *groupingSets)
+{
+	Query		*parse = root->parse;
+	List		*nonnullable_vars;
+	List		*newgroupingSets;
+	ListCell	*lc1;
+	ListCell	*lc2;
+
+	nonnullable_vars = find_nonnullable_vars(parse->havingQual);
+
+	/*
+	 * If we don't find any forced nonnullable Vars, give up.
+	 */
+	if(nonnullable_vars == NIL)
+		return groupingSets;
+
+	newgroupingSets = NIL;
+	foreach(lc1, groupingSets)
+	{
+		List	*gset = (List *) lfirst(lc1);
+		List	*groupingExprs = NIL;
+		List	*overlap;
+
+		foreach(lc2, gset)
+		{
+			Index sortref = lfirst_int(lc2);
+
+			groupingExprs = lappend(groupingExprs,
+									get_sortgroupref_expr(sortref,
+														  parse->targetList));
+		}
+
+		overlap = list_intersection(nonnullable_vars, groupingExprs);
+		if (overlap)
+			newgroupingSets = lappend(newgroupingSets, gset);
+	}
+
+	return newgroupingSets;
 }
 
 /*

@@ -381,6 +381,19 @@ get_sortgroupref_tle(Index sortref, List *targetList)
 }
 
 /*
+ * get_sortgroupclause_expr
+ *		Find the targetlist entry matching the given SortGroupClause
+ *		by ressortgroupref, and return its expression.
+ */
+Node *
+get_sortgroupref_expr(Index sortref, List *targetList)
+{
+	TargetEntry *tle = get_sortgroupref_tle(sortref, targetList);
+
+	return (Node *) tle->expr;
+}
+
+/*
  * get_sortgroupclause_tle
  *		Find the targetlist entry matching the given SortGroupClause
  *		by ressortgroupref, and return it.

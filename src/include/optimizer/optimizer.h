@@ -154,6 +154,8 @@ extern bool predicate_refuted_by(List *predicate_list, List *clause_list,
 extern int	count_nonjunk_tlist_entries(List *tlist);
 extern TargetEntry *get_sortgroupref_tle(Index sortref,
 										 List *targetList);
+extern Node *get_sortgroupref_expr(Index sortref,
+								   List *targetList);
 extern TargetEntry *get_sortgroupclause_tle(SortGroupClause *sgClause,
 											List *targetList);
 extern Node *get_sortgroupclause_expr(SortGroupClause *sgClause,
