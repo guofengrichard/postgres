@@ -88,6 +88,7 @@ create_upper_paths_hook_type create_upper_paths_hook = NULL;
 #define EXPRKIND_ARBITER_ELEM		10
 #define EXPRKIND_TABLEFUNC			11
 #define EXPRKIND_TABLEFUNC_LATERAL	12
+#define EXPRKIND_GROUPEXPR			13
 
 /*
  * Data specific to grouping sets
@@ -748,6 +749,7 @@ subquery_planner(PlannerGlobal *glob, Query *parse, PlannerInfo *parent_root,
 	 */
 	root->hasJoinRTEs = false;
 	root->hasLateralRTEs = false;
+	root->group_rtindex = 0;
 	hasOuterJoins = false;
 	hasResultRTEs = false;
 	foreach(l, parse->rtable)
@@ -781,6 +783,10 @@ subquery_planner(PlannerGlobal *glob, Query *parse, PlannerInfo *parent_root,
 			case RTE_RESULT:
 				hasResultRTEs = true;
 				break;
+			case RTE_GROUP:
+				Assert(parse->hasGroupRTE);
+				root->group_rtindex = list_cell_number(parse->rtable, l) + 1;
+				break;
 			default:
 				/* No work here for other RTE types */
 				break;
@@ -811,6 +817,30 @@ subquery_planner(PlannerGlobal *glob, Query *parse, PlannerInfo *parent_root,
 		if (!rte->inh)
 			root->leaf_result_relids =
 				bms_make_singleton(parse->resultRelation);
+	}
+
+	/*
+	 * Replace any Vars in the subquery's targetlist and havingQual that
+	 * reference GROUP outputs with the underlying grouping expressions.
+	 *
+	 * Note that we need to preprocess the grouping expressions before we
+	 * perform the replacement.  This is because we want to have only one
+	 * instance of SubPlan for each SubLink contained in the grouping
+	 * expressions.
+	 */
+	if (parse->hasGroupRTE)
+	{
+		RangeTblEntry *rte = rt_fetch(root->group_rtindex, parse->rtable);
+
+		/* Preprocess the groupexprs list fully */
+		rte->groupexprs = (List *)
+			preprocess_expression(root, (Node *) rte->groupexprs,
+								  EXPRKIND_GROUPEXPR);
+
+		parse->targetList = (List *)
+			flatten_group_exprs(root, root->parse, (Node *) parse->targetList);
+		parse->havingQual =
+			flatten_group_exprs(root, root->parse, parse->havingQual);
 	}
 
 	/*
