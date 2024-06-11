@@ -3854,6 +3854,10 @@ standard_join_search(PlannerInfo *root, int levels_needed, List *initial_rels)
 		 *
 		 * After that, we're done creating paths for the joinrel, so run
 		 * set_cheapest().
+		 *
+		 * In addition, we also run generate_grouped_paths() for the grouped
+		 * relation of each just-processed joinrel, and run set_cheapest() for
+		 * the grouped relation afterwards.
 		 */
 		foreach(lc, root->join_rel_level[lev])
 		{
@@ -3873,6 +3877,27 @@ standard_join_search(PlannerInfo *root, int levels_needed, List *initial_rels)
 
 			/* Find and save the cheapest paths for this rel */
 			set_cheapest(rel);
+
+			/*
+			 * Except for the topmost scan/join rel, consider generating
+			 * partial aggregation paths for the grouped relation on top of the
+			 * paths of this rel.  After that, we're done creating paths for
+			 * the grouped relation, so run set_cheapest().
+			 */
+			if (!bms_equal(rel->relids, root->all_query_rels))
+			{
+				RelOptInfo   *rel_grouped;
+				RelAggInfo   *agg_info;
+
+				rel_grouped = find_grouped_rel(root, rel->relids,
+											   &agg_info);
+				if (rel_grouped)
+				{
+					generate_grouped_paths(root, rel_grouped, rel,
+										   agg_info);
+					set_cheapest(rel_grouped);
+				}
+			}
 
 #ifdef OPTIMIZER_DEBUG
 			pprint(rel);
@@ -4741,6 +4766,29 @@ generate_partitionwise_join_paths(PlannerInfo *root, RelOptInfo *rel)
 		/* Dummy children need not be scanned, so ignore those. */
 		if (IS_DUMMY_REL(child_rel))
 			continue;
+
+		/*
+		 * Except for the topmost scan/join rel, consider generating partial
+		 * aggregation paths for the grouped relation on top of the paths of
+		 * this partitioned child-join.  After that, we're done creating paths
+		 * for the grouped relation, so run set_cheapest().
+		 */
+		if (!bms_equal(IS_OTHER_REL(rel) ?
+					   rel->top_parent_relids : rel->relids,
+					   root->all_query_rels))
+		{
+			RelOptInfo   *rel_grouped;
+			RelAggInfo   *agg_info;
+
+			rel_grouped = find_grouped_rel(root, child_rel->relids,
+										   &agg_info);
+			if (rel_grouped)
+			{
+				generate_grouped_paths(root, rel_grouped, child_rel,
+									   agg_info);
+				set_cheapest(rel_grouped);
+			}
+		}
 
 #ifdef OPTIMIZER_DEBUG
 		pprint(child_rel);

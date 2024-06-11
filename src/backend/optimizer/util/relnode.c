@@ -2834,8 +2834,6 @@ create_rel_agg_info(PlannerInfo *root, RelOptInfo *rel)
 		mark_partial_aggref(aggref, AGGSPLIT_INITIAL_SERIAL);
 
 		add_column_to_pathtarget(target, (Expr *) aggref, 0);
-
-		result->agg_exprs = lappend(result->agg_exprs, aggref);
 	}
 
 	/*

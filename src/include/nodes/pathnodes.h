@@ -1123,9 +1123,6 @@ typedef struct RelOptInfo
  * "group_clauses", "group_exprs" and "group_pathkeys" are lists of
  * SortGroupClause, the corresponding grouping expressions and PathKey
  * respectively.
- *
- * "agg_exprs" is a list of Aggref nodes for the aggregation of the relation's
- * paths.
  */
 typedef struct RelAggInfo
 {
@@ -1161,9 +1158,6 @@ typedef struct RelAggInfo
 	List	   *group_exprs;
 	/* a list of PathKeys */
 	List	   *group_pathkeys;
-
-	/* a list of Aggref nodes */
-	List	   *agg_exprs;
 } RelAggInfo;
 
 /*
