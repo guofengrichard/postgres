@@ -314,6 +314,10 @@ extern RelOptInfo *find_base_rel(PlannerInfo *root, int relid);
 extern RelOptInfo *find_base_rel_noerr(PlannerInfo *root, int relid);
 extern RelOptInfo *find_base_rel_ignore_join(PlannerInfo *root, int relid);
 extern RelOptInfo *find_join_rel(PlannerInfo *root, Relids relids);
+extern void add_grouped_rel(PlannerInfo *root, RelOptInfo *rel,
+							RelAggInfo *agg_info);
+extern RelOptInfo *find_grouped_rel(PlannerInfo *root, Relids relids,
+									RelAggInfo **agg_info_p);
 extern RelOptInfo *build_join_rel(PlannerInfo *root,
 								  Relids joinrelids,
 								  RelOptInfo *outer_rel,
@@ -348,4 +352,5 @@ extern RelOptInfo *build_child_join_rel(PlannerInfo *root,
 										RelOptInfo *parent_joinrel, List *restrictlist,
 										SpecialJoinInfo *sjinfo);
 
+extern RelAggInfo *create_rel_agg_info(PlannerInfo *root, RelOptInfo *rel);
 #endif							/* PATHNODE_H */

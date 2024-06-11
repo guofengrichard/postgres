@@ -381,8 +381,8 @@ setup_eager_aggregation(PlannerInfo *root)
 		return;
 
 	/*
-	 * Collect aggregate expressions that appear in targetlist and having
-	 * clauses.
+	 * Collect aggregate expressions and plain Vars that appear in targetlist
+	 * and having clauses.
 	 */
 	create_agg_clause_infos(root);
 
@@ -400,10 +400,9 @@ setup_eager_aggregation(PlannerInfo *root)
 }
 
 /*
- * Create AggClauseInfo for each aggregate.
- *
- * If any aggregate is not suitable, set root->agg_clause_list to NIL and
- * return.
+ * create_agg_clause_infos
+ *	  Search the targetlist and havingQual for Aggrefs and plain Vars, and
+ *	  create an AggClauseInfo for each Aggref node.
  */
 static void
 create_agg_clause_infos(PlannerInfo *root)
@@ -412,6 +411,7 @@ create_agg_clause_infos(PlannerInfo *root)
 	ListCell   *lc;
 
 	Assert(root->agg_clause_list == NIL);
+	Assert(root->tlist_vars == NIL);
 
 	tlist_exprs = pull_var_clause((Node *) root->processed_tlist,
 								  PVC_INCLUDE_AGGREGATES |
@@ -455,10 +455,13 @@ create_agg_clause_infos(PlannerInfo *root)
 		AggClauseInfo *ac_info;
 
 		/*
-		 * tlist_exprs may also contain Vars, but we only need Aggrefs.
+		 * collect plain Vars for future reference
 		 */
 		if (IsA(expr, Var))
+		{
+			root->tlist_vars = list_append_unique(root->tlist_vars, expr);
 			continue;
+		}
 
 		aggref = castNode(Aggref, expr);
 
@@ -477,10 +480,11 @@ create_agg_clause_infos(PlannerInfo *root)
 }
 
 /*
- * Create GroupExprInfo for each expression usable as grouping key.
+ * create_grouping_expr_infos
+ *	  Create GroupExprInfo for each expression usable as grouping key.
  *
- * If any grouping expression is not suitable, set root->group_expr_list to NIL
- * and return.
+ * If any grouping expression is not suitable, we will just return with
+ * root->group_expr_list being NIL.
  */
 static void
 create_grouping_expr_infos(PlannerInfo *root)
