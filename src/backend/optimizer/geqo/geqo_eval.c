@@ -85,18 +85,18 @@ geqo_eval(PlannerInfo *root, Gene *tour, int num_gene)
 	 * truncating the list to its original length.  NOTE this assumes that any
 	 * added entries are appended at the end!
 	 *
-	 * We also must take care not to mess up the outer join_rel_hash, if there
-	 * is one.  We can do this by just temporarily setting the link to NULL.
-	 * (If we are dealing with enough join rels, which we very likely are, a
-	 * new hash table will get built and used locally.)
+	 * We also must take care not to mess up the outer join_rel_list->hash, if
+	 * there is one.  We can do this by just temporarily setting the link to
+	 * NULL.  (If we are dealing with enough join rels, which we very likely
+	 * are, a new hash table will get built and used locally.)
 	 *
 	 * join_rel_level[] shouldn't be in use, so just Assert it isn't.
 	 */
-	savelength = list_length(root->join_rel_list);
-	savehash = root->join_rel_hash;
+	savelength = list_length(root->join_rel_list->items);
+	savehash = root->join_rel_list->hash;
 	Assert(root->join_rel_level == NULL);
 
-	root->join_rel_hash = NULL;
+	root->join_rel_list->hash = NULL;
 
 	/* construct the best path for the given combination of relations */
 	joinrel = gimme_tree(root, tour, num_gene);
@@ -121,9 +121,9 @@ geqo_eval(PlannerInfo *root, Gene *tour, int num_gene)
 	 * Restore join_rel_list to its former state, and put back original
 	 * hashtable if any.
 	 */
-	root->join_rel_list = list_truncate(root->join_rel_list,
-										savelength);
-	root->join_rel_hash = savehash;
+	root->join_rel_list->items = list_truncate(root->join_rel_list->items,
+											   savelength);
+	root->join_rel_list->hash = savehash;
 
 	/* release all the memory acquired within gimme_tree */
 	MemoryContextSwitchTo(oldcxt);

@@ -3403,9 +3403,10 @@ make_rel_from_joinlist(PlannerInfo *root, List *joinlist)
  * needed for these paths need have been instantiated.
  *
  * Note to plugin authors: the functions invoked during standard_join_search()
- * modify root->join_rel_list and root->join_rel_hash.  If you want to do more
- * than one join-order search, you'll probably need to save and restore the
- * original states of those data structures.  See geqo_eval() for an example.
+ * modify root->join_rel_list->items and root->join_rel_list->hash.  If you
+ * want to do more than one join-order search, you'll probably need to save and
+ * restore the original states of those data structures.  See geqo_eval() for
+ * an example.
  */
 RelOptInfo *
 standard_join_search(PlannerInfo *root, int levels_needed, List *initial_rels)

@@ -35,11 +35,15 @@
 #include "utils/lsyscache.h"
 
 
-typedef struct JoinHashEntry
+/*
+ * An entry of a hash table that we use to make lookup for RelOptInfo
+ * structures more efficient.
+ */
+typedef struct RelInfoEntry
 {
-	Relids		join_relids;	/* hash key --- MUST BE FIRST */
-	RelOptInfo *join_rel;
-} JoinHashEntry;
+	Relids		relids;			/* hash key --- MUST BE FIRST */
+	RelOptInfo *rel;
+} RelInfoEntry;
 
 static void build_joinrel_tlist(PlannerInfo *root, RelOptInfo *joinrel,
 								RelOptInfo *input_rel,
@@ -479,11 +483,11 @@ find_base_rel_ignore_join(PlannerInfo *root, int relid)
 }
 
 /*
- * build_join_rel_hash
- *	  Construct the auxiliary hash table for join relations.
+ * build_rel_hash
+ *	  Construct the auxiliary hash table for relations.
  */
 static void
-build_join_rel_hash(PlannerInfo *root)
+build_rel_hash(RelInfoList *list)
 {
 	HTAB	   *hashtab;
 	HASHCTL		hash_ctl;
@@ -491,31 +495,84 @@ build_join_rel_hash(PlannerInfo *root)
 
 	/* Create the hash table */
 	hash_ctl.keysize = sizeof(Relids);
-	hash_ctl.entrysize = sizeof(JoinHashEntry);
+	hash_ctl.entrysize = sizeof(RelInfoEntry);
 	hash_ctl.hash = bitmap_hash;
 	hash_ctl.match = bitmap_match;
 	hash_ctl.hcxt = CurrentMemoryContext;
-	hashtab = hash_create("JoinRelHashTable",
+	hashtab = hash_create("RelHashTable",
 						  256L,
 						  &hash_ctl,
 						  HASH_ELEM | HASH_FUNCTION | HASH_COMPARE | HASH_CONTEXT);
 
-	/* Insert all the already-existing joinrels */
-	foreach(l, root->join_rel_list)
+	/* Insert all the already-existing relations */
+	foreach(l, list->items)
 	{
 		RelOptInfo *rel = (RelOptInfo *) lfirst(l);
-		JoinHashEntry *hentry;
+		RelInfoEntry *hentry;
 		bool		found;
 
-		hentry = (JoinHashEntry *) hash_search(hashtab,
-											   &(rel->relids),
-											   HASH_ENTER,
-											   &found);
+		hentry = (RelInfoEntry *) hash_search(hashtab,
+											  &(rel->relids),
+											  HASH_ENTER,
+											  &found);
 		Assert(!found);
-		hentry->join_rel = rel;
+		hentry->rel = rel;
 	}
 
-	root->join_rel_hash = hashtab;
+	list->hash = hashtab;
+}
+
+/*
+ * find_rel_info
+ *	  Find an RelOptInfo entry.
+ */
+static RelOptInfo *
+find_rel_info(RelInfoList *list, Relids relids)
+{
+	if (list == NULL)
+		return NULL;
+
+	/*
+	 * Switch to using hash lookup when list grows "too long".  The threshold
+	 * is arbitrary and is known only here.
+	 */
+	if (!list->hash && list_length(list->items) > 32)
+		build_rel_hash(list);
+
+	/*
+	 * Use either hashtable lookup or linear search, as appropriate.
+	 *
+	 * Note: the seemingly redundant hashkey variable is used to avoid taking
+	 * the address of relids; unless the compiler is exceedingly smart, doing
+	 * so would force relids out of a register and thus probably slow down the
+	 * list-search case.
+	 */
+	if (list->hash)
+	{
+		Relids		hashkey = relids;
+		RelInfoEntry *hentry;
+
+		hentry = (RelInfoEntry *) hash_search(list->hash,
+											  &hashkey,
+											  HASH_FIND,
+											  NULL);
+		if (hentry)
+			return hentry->rel;
+	}
+	else
+	{
+		ListCell   *l;
+
+		foreach(l, list->items)
+		{
+			RelOptInfo *rel = (RelOptInfo *) lfirst(l);
+
+			if (bms_equal(rel->relids, relids))
+				return rel;
+		}
+	}
+
+	return NULL;
 }
 
 /*
@@ -526,47 +583,44 @@ build_join_rel_hash(PlannerInfo *root)
 RelOptInfo *
 find_join_rel(PlannerInfo *root, Relids relids)
 {
-	/*
-	 * Switch to using hash lookup when list grows "too long".  The threshold
-	 * is arbitrary and is known only here.
-	 */
-	if (!root->join_rel_hash && list_length(root->join_rel_list) > 32)
-		build_join_rel_hash(root);
+	return find_rel_info(root->join_rel_list, relids);
+}
 
-	/*
-	 * Use either hashtable lookup or linear search, as appropriate.
-	 *
-	 * Note: the seemingly redundant hashkey variable is used to avoid taking
-	 * the address of relids; unless the compiler is exceedingly smart, doing
-	 * so would force relids out of a register and thus probably slow down the
-	 * list-search case.
-	 */
-	if (root->join_rel_hash)
+/*
+ * add_rel_info
+ *		Add given relation to the given list. Also add it to the auxiliary
+ *		hashtable if there is one.
+ */
+static void
+add_rel_info(RelInfoList *list, RelOptInfo *rel)
+{
+	/* GEQO requires us to append the new relation to the end of the list! */
+	list->items = lappend(list->items, rel);
+
+	/* store it into the auxiliary hashtable if there is one. */
+	if (list->hash)
 	{
-		Relids		hashkey = relids;
-		JoinHashEntry *hentry;
+		RelInfoEntry *hentry;
+		bool		found;
 
-		hentry = (JoinHashEntry *) hash_search(root->join_rel_hash,
-											   &hashkey,
-											   HASH_FIND,
-											   NULL);
-		if (hentry)
-			return hentry->join_rel;
+		hentry = (RelInfoEntry *) hash_search(list->hash,
+											  &(rel->relids),
+											  HASH_ENTER,
+											  &found);
+		Assert(!found);
+		hentry->rel = rel;
 	}
-	else
-	{
-		ListCell   *l;
+}
 
-		foreach(l, root->join_rel_list)
-		{
-			RelOptInfo *rel = (RelOptInfo *) lfirst(l);
-
-			if (bms_equal(rel->relids, relids))
-				return rel;
-		}
-	}
-
-	return NULL;
+/*
+ * add_join_rel
+ *		Add given join relation to the list of join relations in the given
+ *		PlannerInfo.
+ */
+static void
+add_join_rel(PlannerInfo *root, RelOptInfo *joinrel)
+{
+	add_rel_info(root->join_rel_list, joinrel);
 }
 
 /*
@@ -615,32 +669,6 @@ set_foreign_rel_properties(RelOptInfo *joinrel, RelOptInfo *outer_rel,
 			joinrel->useridiscurrent = true;
 			joinrel->fdwroutine = outer_rel->fdwroutine;
 		}
-	}
-}
-
-/*
- * add_join_rel
- *		Add given join relation to the list of join relations in the given
- *		PlannerInfo. Also add it to the auxiliary hashtable if there is one.
- */
-static void
-add_join_rel(PlannerInfo *root, RelOptInfo *joinrel)
-{
-	/* GEQO requires us to append the new joinrel to the end of the list! */
-	root->join_rel_list = lappend(root->join_rel_list, joinrel);
-
-	/* store it into the auxiliary hashtable if there is one. */
-	if (root->join_rel_hash)
-	{
-		JoinHashEntry *hentry;
-		bool		found;
-
-		hentry = (JoinHashEntry *) hash_search(root->join_rel_hash,
-											   &(joinrel->relids),
-											   HASH_ENTER,
-											   &found);
-		Assert(!found);
-		hentry->join_rel = joinrel;
 	}
 }
 
@@ -1469,22 +1497,14 @@ subbuild_joinrel_joinlist(RelOptInfo *joinrel,
 RelOptInfo *
 fetch_upper_rel(PlannerInfo *root, UpperRelationKind kind, Relids relids)
 {
+	RelInfoList *list = &root->upper_rels[kind];
 	RelOptInfo *upperrel;
-	ListCell   *lc;
-
-	/*
-	 * For the moment, our indexing data structure is just a List for each
-	 * relation kind.  If we ever get so many of one kind that this stops
-	 * working well, we can improve it.  No code outside this function should
-	 * assume anything about how to find a particular upperrel.
-	 */
 
 	/* If we already made this upperrel for the query, return it */
-	foreach(lc, root->upper_rels[kind])
+	if (list)
 	{
-		upperrel = (RelOptInfo *) lfirst(lc);
-
-		if (bms_equal(upperrel->relids, relids))
+		upperrel = find_rel_info(list, relids);
+		if (upperrel)
 			return upperrel;
 	}
 
@@ -1503,7 +1523,7 @@ fetch_upper_rel(PlannerInfo *root, UpperRelationKind kind, Relids relids)
 	upperrel->cheapest_unique_path = NULL;
 	upperrel->cheapest_parameterized_paths = NIL;
 
-	root->upper_rels[kind] = lappend(root->upper_rels[kind], upperrel);
+	add_rel_info(&root->upper_rels[kind], upperrel);
 
 	return upperrel;
 }

@@ -80,6 +80,25 @@ typedef enum UpperRelationKind
 	/* NB: UPPERREL_FINAL must be last enum entry; it's used to size arrays */
 } UpperRelationKind;
 
+/*
+ * Hashed list to store relation specific info and to retrieve it by relids.
+ *
+ * For small problems we just scan the list to do lookups, but when there are
+ * many relations we build a hash table for faster lookups.  The hash table is
+ * present and valid when 'hash' is not NULL.  Note that we still maintain the
+ * list even when using the hash table for lookups; this simplifies life for
+ * GEQO.
+ */
+typedef struct RelInfoList
+{
+	pg_node_attr(no_copy_equal, no_read)
+
+	NodeTag		type;
+
+	List	   *items;
+	struct HTAB *hash pg_node_attr(read_write_ignore);
+} RelInfoList;
+
 /*----------
  * PlannerGlobal
  *		Global information for planning/optimization
@@ -270,15 +289,9 @@ struct PlannerInfo
 
 	/*
 	 * join_rel_list is a list of all join-relation RelOptInfos we have
-	 * considered in this planning run.  For small problems we just scan the
-	 * list to do lookups, but when there are many join relations we build a
-	 * hash table for faster lookups.  The hash table is present and valid
-	 * when join_rel_hash is not NULL.  Note that we still maintain the list
-	 * even when using the hash table for lookups; this simplifies life for
-	 * GEQO.
+	 * considered in this planning run.
 	 */
-	List	   *join_rel_list;
-	struct HTAB *join_rel_hash pg_node_attr(read_write_ignore);
+	RelInfoList *join_rel_list;	/* list of join-relation RelOptInfos */
 
 	/*
 	 * When doing a dynamic-programming-style join search, join_rel_level[k]
@@ -413,7 +426,7 @@ struct PlannerInfo
 	 * Upper-rel RelOptInfos. Use fetch_upper_rel() to get any particular
 	 * upper rel.
 	 */
-	List	   *upper_rels[UPPERREL_FINAL + 1] pg_node_attr(read_write_ignore);
+	RelInfoList		upper_rels[UPPERREL_FINAL + 1] pg_node_attr(read_write_ignore);
 
 	/* Result tlists chosen by grouping_planner for upper-stage processing */
 	struct PathTarget *upper_targets[UPPERREL_FINAL + 1] pg_node_attr(read_write_ignore);
