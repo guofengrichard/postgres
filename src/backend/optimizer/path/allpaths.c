@@ -40,6 +40,7 @@
 #include "optimizer/paths.h"
 #include "optimizer/plancat.h"
 #include "optimizer/planner.h"
+#include "optimizer/prep.h"
 #include "optimizer/tlist.h"
 #include "parser/parse_clause.h"
 #include "parser/parsetree.h"
@@ -47,6 +48,7 @@
 #include "port/pg_bitutils.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/lsyscache.h"
+#include "utils/selfuncs.h"
 
 
 /* Bitmask flags for pushdown_safety_info.unsafeFlags */
@@ -3293,6 +3295,311 @@ generate_useful_gather_paths(PlannerInfo *root, RelOptInfo *rel, bool override_r
 
 			add_path(rel, &path->path);
 		}
+	}
+}
+
+/*
+ * generate_grouped_paths
+ *		Generate paths for a grouped relation by adding sorted and hashed
+ *		partial aggregation paths on top of paths of the plain base or join
+ *		relation.
+ *
+ * The information needed are provided by the RelAggInfo structure.
+ */
+void
+generate_grouped_paths(PlannerInfo *root, RelOptInfo *rel_grouped,
+					   RelOptInfo *rel_plain, RelAggInfo *agg_info)
+{
+	AggClauseCosts agg_costs;
+	bool		can_hash;
+	bool		can_sort;
+	Path	   *cheapest_total_path = NULL;
+	Path	   *cheapest_partial_path = NULL;
+	double		dNumGroups = 0;
+	double		dNumPartialGroups = 0;
+
+	if (IS_DUMMY_REL(rel_plain))
+	{
+		mark_dummy_rel(rel_grouped);
+		return;
+	}
+
+	MemSet(&agg_costs, 0, sizeof(AggClauseCosts));
+	get_agg_clause_costs(root, AGGSPLIT_INITIAL_SERIAL, &agg_costs);
+
+	/*
+	 * Determine whether it's possible to perform sort-based implementations of
+	 * grouping.
+	 */
+	can_sort = grouping_is_sortable(agg_info->group_clauses);
+
+	/*
+	 * Determine whether we should consider hash-based implementations of
+	 * grouping.
+	 */
+	Assert(root->numOrderedAggs == 0);
+	can_hash = (agg_info->group_clauses != NIL &&
+				grouping_is_hashable(agg_info->group_clauses));
+
+	/*
+	 * Consider whether we should generate partially aggregated non-partial
+	 * paths.  We can only do this if we have a non-partial path.
+	 */
+	if (rel_plain->pathlist != NIL)
+	{
+		cheapest_total_path = rel_plain->cheapest_total_path;
+		Assert(cheapest_total_path != NULL);
+	}
+
+	/*
+	 * If parallelism is possible for rel_grouped, then we should consider
+	 * generating partially-grouped partial paths.  However, if the plain rel
+	 * has no partial paths, then we can't.
+	 */
+	if (rel_grouped->consider_parallel && rel_plain->partial_pathlist != NIL)
+	{
+		cheapest_partial_path = linitial(rel_plain->partial_pathlist);
+		Assert(cheapest_partial_path != NULL);
+	}
+
+	/* Estimate number of partial groups. */
+	if (cheapest_total_path != NULL)
+		dNumGroups = estimate_num_groups(root,
+										 agg_info->group_exprs,
+										 cheapest_total_path->rows,
+										 NULL, NULL);
+	if (cheapest_partial_path != NULL)
+		dNumPartialGroups = estimate_num_groups(root,
+												agg_info->group_exprs,
+												cheapest_partial_path->rows,
+												NULL, NULL);
+
+	if (can_sort && cheapest_total_path != NULL)
+	{
+		ListCell   *lc;
+
+		/*
+		 * Use any available suitably-sorted path as input, and also consider
+		 * sorting the cheapest-total path.
+		 */
+		foreach(lc, rel_plain->pathlist)
+		{
+			Path	   *input_path = (Path *) lfirst(lc);
+			Path	   *path;
+			bool		is_sorted;
+			int			presorted_keys;
+
+			/*
+			 * Since the path originates from the non-grouped relation which is
+			 * not aware of eager aggregation, we must ensure that it provides
+			 * the correct input for the partial aggregation.
+			 */
+			path = (Path *) create_projection_path(root,
+												   rel_grouped,
+												   input_path,
+												   agg_info->agg_input);
+
+			is_sorted = pathkeys_count_contained_in(agg_info->group_pathkeys,
+													path->pathkeys,
+													&presorted_keys);
+			if (!is_sorted)
+			{
+				/*
+				 * Try at least sorting the cheapest path and also try
+				 * incrementally sorting any path which is partially sorted
+				 * already (no need to deal with paths which have presorted
+				 * keys when incremental sort is disabled unless it's the
+				 * cheapest input path).
+				 */
+				if (input_path != cheapest_total_path &&
+					(presorted_keys == 0 || !enable_incremental_sort))
+					continue;
+
+				/*
+				 * We've no need to consider both a sort and incremental sort.
+				 * We'll just do a sort if there are no presorted keys and an
+				 * incremental sort when there are presorted keys.
+				 */
+				if (presorted_keys == 0 || !enable_incremental_sort)
+					path = (Path *) create_sort_path(root,
+													 rel_grouped,
+													 path,
+													 agg_info->group_pathkeys,
+													 -1.0);
+				else
+					path = (Path *) create_incremental_sort_path(root,
+																 rel_grouped,
+																 path,
+																 agg_info->group_pathkeys,
+																 presorted_keys,
+																 -1.0);
+			}
+
+			/*
+			 * qual is NIL because the HAVING clause cannot be evaluated until the
+			 * final value of the aggregate is known.
+			 */
+			path = (Path *) create_agg_path(root,
+											rel_grouped,
+											path,
+											agg_info->target,
+											AGG_SORTED,
+											AGGSPLIT_INITIAL_SERIAL,
+											agg_info->group_clauses,
+											NIL,
+											&agg_costs,
+											dNumGroups);
+
+			add_path(rel_grouped, path);
+		}
+	}
+
+	if (can_sort && cheapest_partial_path != NULL)
+	{
+		ListCell   *lc;
+
+		/* Similar to above logic, but for partial paths. */
+		foreach(lc, rel_plain->partial_pathlist)
+		{
+			Path	   *input_path = (Path *) lfirst(lc);
+			Path	   *path;
+			bool		is_sorted;
+			int			presorted_keys;
+
+			/*
+			 * Since the path originates from the non-grouped relation which is
+			 * not aware of eager aggregation, we must ensure that it provides
+			 * the correct input for the partial aggregation.
+			 */
+			path = (Path *) create_projection_path(root,
+												   rel_grouped,
+												   input_path,
+												   agg_info->agg_input);
+
+			is_sorted = pathkeys_count_contained_in(agg_info->group_pathkeys,
+													path->pathkeys,
+													&presorted_keys);
+
+			if (!is_sorted)
+			{
+				/*
+				 * Try at least sorting the cheapest path and also try
+				 * incrementally sorting any path which is partially sorted
+				 * already (no need to deal with paths which have presorted
+				 * keys when incremental sort is disabled unless it's the
+				 * cheapest input path).
+				 */
+				if (input_path != cheapest_partial_path &&
+					(presorted_keys == 0 || !enable_incremental_sort))
+					continue;
+
+				/*
+				 * We've no need to consider both a sort and incremental sort.
+				 * We'll just do a sort if there are no presorted keys and an
+				 * incremental sort when there are presorted keys.
+				 */
+				if (presorted_keys == 0 || !enable_incremental_sort)
+					path = (Path *) create_sort_path(root,
+													 rel_grouped,
+													 path,
+													 agg_info->group_pathkeys,
+													 -1.0);
+				else
+					path = (Path *) create_incremental_sort_path(root,
+																 rel_grouped,
+																 path,
+																 agg_info->group_pathkeys,
+																 presorted_keys,
+																 -1.0);
+			}
+
+			/*
+			 * qual is NIL because the HAVING clause cannot be evaluated until the
+			 * final value of the aggregate is known.
+			 */
+			path = (Path *) create_agg_path(root,
+											rel_grouped,
+											path,
+											agg_info->target,
+											AGG_SORTED,
+											AGGSPLIT_INITIAL_SERIAL,
+											agg_info->group_clauses,
+											NIL,
+											&agg_costs,
+											dNumPartialGroups);
+
+			add_partial_path(rel_grouped, path);
+		}
+	}
+
+	/*
+	 * Add a partially-grouped HashAgg Path where possible
+	 */
+	if (can_hash && cheapest_total_path != NULL)
+	{
+		Path   *path;
+
+		/*
+		 * Since the path originates from the non-grouped relation which is
+		 * not aware of eager aggregation, we must ensure that it provides
+		 * the correct input for the partial aggregation.
+		 */
+		path = (Path *) create_projection_path(root,
+											   rel_grouped,
+											   cheapest_total_path,
+											   agg_info->agg_input);
+
+		/*
+		 * qual is NIL because the HAVING clause cannot be evaluated until
+		 * the final value of the aggregate is known.
+		 */
+		path = (Path *) create_agg_path(root,
+										rel_grouped,
+										path,
+										agg_info->target,
+										AGG_HASHED,
+										AGGSPLIT_INITIAL_SERIAL,
+										agg_info->group_clauses,
+										NIL,
+										&agg_costs,
+										dNumGroups);
+
+		add_path(rel_grouped, path);
+	}
+
+	/*
+	 * Now add a partially-grouped HashAgg partial Path where possible
+	 */
+	if (can_hash && cheapest_partial_path != NULL)
+	{
+		Path   *path;
+
+		/*
+		 * Since the path originates from the non-grouped relation which is
+		 * not aware of eager aggregation, we must ensure that it provides
+		 * the correct input for the partial aggregation.
+		 */
+		path = (Path *) create_projection_path(root,
+											   rel_grouped,
+											   cheapest_partial_path,
+											   agg_info->agg_input);
+
+		/*
+		 * qual is NIL because the HAVING clause cannot be evaluated until
+		 * the final value of the aggregate is known.
+		 */
+		path = (Path *) create_agg_path(root,
+										rel_grouped,
+										path,
+										agg_info->target,
+										AGG_HASHED,
+										AGGSPLIT_INITIAL_SERIAL,
+										agg_info->group_clauses,
+										NIL,
+										&agg_costs,
+										dNumPartialGroups);
+
+		add_partial_path(rel_grouped, path);
 	}
 }
 
