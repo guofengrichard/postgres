@@ -1079,6 +1079,79 @@ typedef struct RelOptInfo
 	 (rel)->part_rels && (rel)->partexprs && (rel)->nullable_partexprs)
 
 /*
+ * RelAggInfo
+ *		Information needed to create grouped paths for base and join rels.
+ *
+ * "relids" is the set of relation identifiers (RT indexes), just like with
+ * RelOptInfo.
+ *
+ * "target" will be used as pathtarget if partial aggregation is applied to
+ * base relation or join. The same target will also --- if the relation is a
+ * join --- be used to join grouped path to a non-grouped one.  This target can
+ * contain plain-Var grouping expressions and Aggref nodes.
+ *
+ * Note: There's a convention that Aggref expressions are supposed to follow
+ * the other expressions of the target. Iterations of ->exprs may rely on this
+ * arrangement.
+ *
+ * "agg_input" contains Vars used either as grouping expressions or aggregate
+ * arguments. Paths providing the aggregation plan with input data should use
+ * this target. The only difference from reltarget of the non-grouped relation
+ * is that some items can have sortgroupref initialized.
+ *
+ * "input_rows" is the estimated number of input rows for AggPath. It's
+ * actually just a workspace for users of the structure, i.e. not initialized
+ * when instance of the structure is created.
+ *
+ * "grouped_rows" is the estimated number of result rows of the AggPath.
+ *
+ * "group_clauses", "group_exprs" and "group_pathkeys" are lists of
+ * SortGroupClause, the corresponding grouping expressions and PathKey
+ * respectively.
+ *
+ * "agg_exprs" is a list of Aggref nodes for the aggregation of the relation's
+ * paths.
+ */
+typedef struct RelAggInfo
+{
+	pg_node_attr(no_copy_equal, no_read, no_query_jumble)
+
+	NodeTag		type;
+
+	/*
+	 * the same as in RelOptInfo; set of base + OJ relids (rangetable indexes)
+	 */
+	Relids		relids;
+
+	/*
+	 * the targetlist for Paths scanning this grouped rel; list of Vars/Exprs,
+	 * cost, width
+	 */
+	struct PathTarget *target;
+
+	/*
+	 * the targetlist for Paths that generate input for the grouped paths
+	 */
+	struct PathTarget *agg_input;
+
+	/* estimated number of input tuples for the grouped paths */
+	Cardinality		input_rows;
+
+	/* estimated number of result tuples of the grouped relation*/
+	Cardinality		grouped_rows;
+
+	/* a list of SortGroupClause's */
+	List	   *group_clauses;
+	/* a list of grouping expressions */
+	List	   *group_exprs;
+	/* a list of PathKeys */
+	List	   *group_pathkeys;
+
+	/* a list of Aggref nodes */
+	List	   *agg_exprs;
+} RelAggInfo;
+
+/*
  * IndexOptInfo
  *		Per-index information for planning/optimization
  *

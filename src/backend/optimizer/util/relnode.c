@@ -36,13 +36,13 @@
 
 
 /*
- * An entry of a hash table that we use to make lookup for RelOptInfo
- * structures more efficient.
+ * An entry of a hash table that we use to make lookup for RelOptInfo or
+ * RelAggInfo structures more efficient.
  */
 typedef struct RelInfoEntry
 {
 	Relids		relids;			/* hash key --- MUST BE FIRST */
-	RelOptInfo *rel;
+	void	   *data;
 } RelInfoEntry;
 
 static void build_joinrel_tlist(PlannerInfo *root, RelOptInfo *joinrel,
@@ -484,7 +484,7 @@ find_base_rel_ignore_join(PlannerInfo *root, int relid)
 
 /*
  * build_rel_hash
- *	  Construct the auxiliary hash table for relations.
+ *	  Construct the auxiliary hash table for relation specific data.
  */
 static void
 build_rel_hash(RelInfoList *list)
@@ -504,19 +504,27 @@ build_rel_hash(RelInfoList *list)
 						  &hash_ctl,
 						  HASH_ELEM | HASH_FUNCTION | HASH_COMPARE | HASH_CONTEXT);
 
-	/* Insert all the already-existing relations */
+	/* Insert all the already-existing relation specific infos */
 	foreach(l, list->items)
 	{
-		RelOptInfo *rel = (RelOptInfo *) lfirst(l);
+		void	   *item = lfirst(l);
 		RelInfoEntry *hentry;
 		bool		found;
+		Relids		relids;
+
+		Assert(IsA(item, RelOptInfo) || IsA(item, RelAggInfo));
+
+		if (IsA(item, RelOptInfo))
+			relids = ((RelOptInfo *) item)->relids;
+		else
+			relids = ((RelAggInfo *) item)->relids;
 
 		hentry = (RelInfoEntry *) hash_search(hashtab,
-											  &(rel->relids),
+											  &relids,
 											  HASH_ENTER,
 											  &found);
 		Assert(!found);
-		hentry->rel = rel;
+		hentry->data = item;
 	}
 
 	list->hash = hashtab;
@@ -524,9 +532,9 @@ build_rel_hash(RelInfoList *list)
 
 /*
  * find_rel_info
- *	  Find an RelOptInfo entry.
+ *	  Find an RelOptInfo or a RelAggInfo entry.
  */
-static RelOptInfo *
+static void *
 find_rel_info(RelInfoList *list, Relids relids)
 {
 	if (list == NULL)
@@ -557,7 +565,7 @@ find_rel_info(RelInfoList *list, Relids relids)
 											  HASH_FIND,
 											  NULL);
 		if (hentry)
-			return hentry->rel;
+			return hentry->data;
 	}
 	else
 	{
@@ -565,10 +573,18 @@ find_rel_info(RelInfoList *list, Relids relids)
 
 		foreach(l, list->items)
 		{
-			RelOptInfo *rel = (RelOptInfo *) lfirst(l);
+			void	   *item = lfirst(l);
+			Relids		item_relids = NULL;
 
-			if (bms_equal(rel->relids, relids))
-				return rel;
+			Assert(IsA(item, RelOptInfo) || IsA(item, RelAggInfo));
+
+			if (IsA(item, RelOptInfo))
+				item_relids = ((RelOptInfo *) item)->relids;
+			else if (IsA(item, RelAggInfo))
+				item_relids = ((RelAggInfo *) item)->relids;
+
+			if (bms_equal(item_relids, relids))
+				return item;
 		}
 	}
 
@@ -583,32 +599,40 @@ find_rel_info(RelInfoList *list, Relids relids)
 RelOptInfo *
 find_join_rel(PlannerInfo *root, Relids relids)
 {
-	return find_rel_info(root->join_rel_list, relids);
+	return (RelOptInfo *) find_rel_info(root->join_rel_list, relids);
 }
 
 /*
  * add_rel_info
- *		Add given relation to the given list. Also add it to the auxiliary
+ *		Add relation specific info to a list, and also add it to the auxiliary
  *		hashtable if there is one.
  */
 static void
-add_rel_info(RelInfoList *list, RelOptInfo *rel)
+add_rel_info(RelInfoList *list, void *data)
 {
+	Assert(IsA(data, RelOptInfo) || IsA(data, RelAggInfo));
+
 	/* GEQO requires us to append the new relation to the end of the list! */
-	list->items = lappend(list->items, rel);
+	list->items = lappend(list->items, data);
 
 	/* store it into the auxiliary hashtable if there is one. */
 	if (list->hash)
 	{
+		Relids		relids;
 		RelInfoEntry *hentry;
 		bool		found;
 
+		if (IsA(data, RelOptInfo))
+			relids = ((RelOptInfo *) data)->relids;
+		else
+			relids = ((RelAggInfo *) data)->relids;
+
 		hentry = (RelInfoEntry *) hash_search(list->hash,
-											  &(rel->relids),
+											  &relids,
 											  HASH_ENTER,
 											  &found);
 		Assert(!found);
-		hentry->rel = rel;
+		hentry->data = data;
 	}
 }
 
@@ -1503,7 +1527,7 @@ fetch_upper_rel(PlannerInfo *root, UpperRelationKind kind, Relids relids)
 	/* If we already made this upperrel for the query, return it */
 	if (list)
 	{
-		upperrel = find_rel_info(list, relids);
+		upperrel = (RelOptInfo *) find_rel_info(list, relids);
 		if (upperrel)
 			return upperrel;
 	}
