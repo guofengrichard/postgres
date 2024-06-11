@@ -2381,6 +2381,7 @@ RelInfo
 RelInfoArr
 RelInfoEntry
 RelInfoList
+RelInfoListInfo
 RelMapFile
 RelMapping
 RelOptInfo
