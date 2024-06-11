@@ -16,6 +16,7 @@
 
 #include <limits.h>
 
+#include "catalog/pg_constraint.h"
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/appendinfo.h"
@@ -27,12 +28,15 @@
 #include "optimizer/paths.h"
 #include "optimizer/placeholder.h"
 #include "optimizer/plancat.h"
+#include "optimizer/planner.h"
 #include "optimizer/restrictinfo.h"
 #include "optimizer/tlist.h"
+#include "parser/parse_oper.h"
 #include "parser/parse_relation.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/hsearch.h"
 #include "utils/lsyscache.h"
+#include "utils/selfuncs.h"
 
 
 /*
@@ -417,6 +421,103 @@ build_simple_rel(PlannerInfo *root, int relid, RelOptInfo *parent)
 	}
 
 	return rel;
+}
+
+/*
+ * build_simple_grouped_rel
+ *	  Construct a new RelOptInfo for a grouped base relation out of an existing
+ *	  non-grouped base relation.
+ *
+ * On success, the new RelOptInfo is returned and the corresponding RelAggInfo
+ * is stored in *agg_info_p.
+ */
+RelOptInfo *
+build_simple_grouped_rel(PlannerInfo *root, int relid,
+						 RelAggInfo **agg_info_p)
+{
+	RelOptInfo	   *rel_plain;
+	RelOptInfo	   *rel_grouped;
+	RelAggInfo	   *agg_info;
+
+	/*
+	 * We should have available aggregate expressions and grouping expressions,
+	 * otherwise we cannot reach here.
+	 */
+	Assert(root->agg_clause_list != NIL);
+	Assert(root->group_expr_list != NIL);
+
+	rel_plain = root->simple_rel_array[relid];
+	Assert(rel_plain != NULL);
+	Assert(IS_SIMPLE_REL(rel_plain));
+
+	/* nothing to do for dummy rel */
+	if (IS_DUMMY_REL(rel_plain))
+		return NULL;
+
+	/*
+	 * Prepare the information we need to create grouped paths for this base
+	 * relation.
+	 */
+	agg_info = create_rel_agg_info(root, rel_plain);
+	if (agg_info == NULL)
+		return NULL;
+
+	/* build a grouped relation out of the plain relation */
+	rel_grouped = build_grouped_rel(root, rel_plain);
+	rel_grouped->reltarget = agg_info->target;
+	rel_grouped->rows = agg_info->grouped_rows;
+
+	/* return the RelAggInfo structure */
+	*agg_info_p = agg_info;
+
+	return rel_grouped;
+}
+
+/*
+ * build_grouped_rel
+ *	  Build a grouped relation by flat copying a plain relation and resetting
+ *	  the necessary fields.
+ */
+RelOptInfo *
+build_grouped_rel(PlannerInfo *root, RelOptInfo *rel_plain)
+{
+	RelOptInfo   *rel_grouped;
+
+	rel_grouped = makeNode(RelOptInfo);
+	memcpy(rel_grouped, rel_plain, sizeof(RelOptInfo));
+
+	/*
+	 * clear path info
+	 */
+	rel_grouped->pathlist = NIL;
+	rel_grouped->ppilist = NIL;
+	rel_grouped->partial_pathlist = NIL;
+	rel_grouped->cheapest_startup_path = NULL;
+	rel_grouped->cheapest_total_path = NULL;
+	rel_grouped->cheapest_unique_path = NULL;
+	rel_grouped->cheapest_parameterized_paths = NIL;
+
+	/*
+	 * clear partition info
+	 */
+	rel_grouped->part_scheme = NULL;
+	rel_grouped->nparts = -1;
+	rel_grouped->boundinfo = NULL;
+	rel_grouped->partbounds_merged = false;
+	rel_grouped->partition_qual = NIL;
+	rel_grouped->part_rels = NULL;
+	rel_grouped->live_parts = NULL;
+	rel_grouped->all_partrels = NULL;
+	rel_grouped->partexprs = NULL;
+	rel_grouped->nullable_partexprs = NULL;
+	rel_grouped->consider_partitionwise_join = false;
+
+	/*
+	 * clear size estimates
+	 */
+	rel_grouped->rows = 0;
+
+	return rel_grouped;
 }
 
 /*

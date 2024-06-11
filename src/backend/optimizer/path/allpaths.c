@@ -93,6 +93,7 @@ join_search_hook_type join_search_hook = NULL;
 
 static void set_base_rel_consider_startup(PlannerInfo *root);
 static void set_base_rel_sizes(PlannerInfo *root);
+static void setup_base_grouped_rels(PlannerInfo *root);
 static void set_base_rel_pathlists(PlannerInfo *root);
 static void set_rel_size(PlannerInfo *root, RelOptInfo *rel,
 						 Index rti, RangeTblEntry *rte);
@@ -117,6 +118,7 @@ static void set_append_rel_size(PlannerInfo *root, RelOptInfo *rel,
 								Index rti, RangeTblEntry *rte);
 static void set_append_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 									Index rti, RangeTblEntry *rte);
+static void set_grouped_rel_pathlist(PlannerInfo *root, RelOptInfo *rel);
 static void generate_orderedappend_paths(PlannerInfo *root, RelOptInfo *rel,
 										 List *live_childrels,
 										 List *all_child_pathkeys);
@@ -184,6 +186,11 @@ make_one_rel(PlannerInfo *root, List *joinlist)
 	 * Compute size estimates and consider_parallel flags for each base rel.
 	 */
 	set_base_rel_sizes(root);
+
+	/*
+	 * Build grouped base relations for each base rel if possible.
+	 */
+	setup_base_grouped_rels(root);
 
 	/*
 	 * We should now have size estimates for every actual table involved in
@@ -323,6 +330,59 @@ set_base_rel_sizes(PlannerInfo *root)
 			set_rel_consider_parallel(root, rel, rte);
 
 		set_rel_size(root, rel, rti, rte);
+	}
+}
+
+/*
+ * setup_base_grouped_rels
+ *	  For each "plain" base relation build a grouped base relation if eager
+ *	  aggregation is possible and if this relation can produce grouped paths.
+ */
+static void
+setup_base_grouped_rels(PlannerInfo *root)
+{
+	Index		rti;
+
+	/*
+	 * If there are no aggregate expressions or grouping expressions, eager
+	 * aggregation is not possible.
+	 */
+	if (root->agg_clause_list == NIL ||
+		root->group_expr_list == NIL)
+		return;
+
+	/*
+	 * Eager aggregation only makes sense if there are multiple base rels in
+	 * the query.
+	 */
+	if (bms_membership(root->all_baserels) != BMS_MULTIPLE)
+		return;
+
+	for (rti = 1; rti < root->simple_rel_array_size; rti++)
+	{
+		RelOptInfo	   *rel = root->simple_rel_array[rti];
+		RelOptInfo	   *rel_grouped;
+		RelAggInfo	   *agg_info;
+
+		/* there may be empty slots corresponding to non-baserel RTEs */
+		if (rel == NULL)
+			continue;
+
+		Assert(rel->relid == rti); /* sanity check on array */
+
+		/*
+		 * Ignore RTEs that are not simple rels.  Note that we need to consider
+		 * "other rels" here.
+		 */
+		if (!IS_SIMPLE_REL(rel))
+			continue;
+
+		rel_grouped = build_simple_grouped_rel(root, rel->relid, &agg_info);
+		if (rel_grouped)
+		{
+			/* Make the grouped relation available for joining. */
+			add_grouped_rel(root, rel_grouped, agg_info);
+		}
 	}
 }
 
@@ -561,6 +621,15 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 
 	/* Now find the cheapest of the paths for this rel */
 	set_cheapest(rel);
+
+	/*
+	 * If a grouped relation for this rel exists, build partial aggregation
+	 * paths for it.
+	 *
+	 * Note that this can only happen after we've called set_cheapest() for
+	 * this base rel, because we need its cheapest paths.
+	 */
+	set_grouped_rel_pathlist(root, rel);
 
 #ifdef OPTIMIZER_DEBUG
 	pprint(rel);
@@ -1287,6 +1356,28 @@ set_append_rel_pathlist(PlannerInfo *root, RelOptInfo *rel,
 
 	/* Add paths to the append relation. */
 	add_paths_to_append_rel(root, rel, live_childrels);
+}
+
+/*
+ * set_grouped_rel_pathlist
+ *	  If a grouped relation for the given 'rel' exists, build partial
+ *	  aggregation paths for it.
+ */
+static void
+set_grouped_rel_pathlist(PlannerInfo *root, RelOptInfo *rel)
+{
+	RelOptInfo   *rel_grouped;
+	RelAggInfo   *agg_info;
+
+	/* Add paths to the grouped base relation if one exists. */
+	rel_grouped = find_grouped_rel(root, rel->relids,
+								   &agg_info);
+	if (rel_grouped)
+	{
+		generate_grouped_paths(root, rel_grouped, rel,
+							   agg_info);
+		set_cheapest(rel_grouped);
+	}
 }
 
 
