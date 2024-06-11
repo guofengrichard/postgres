@@ -386,6 +386,12 @@ struct PlannerInfo
 	/* list of PlaceHolderInfos */
 	List	   *placeholder_list;
 
+	/* list of AggClauseInfos */
+	List	   *agg_clause_list;
+
+	/* List of GroupExprInfos */
+	List	   *group_expr_list;
+
 	/* array of PlaceHolderInfos indexed by phid */
 	struct PlaceHolderInfo **placeholder_array pg_node_attr(read_write_ignore, array_size(placeholder_array_size));
 	/* allocated size of array */
@@ -3218,6 +3224,41 @@ typedef struct MinMaxAggInfo
 	/* param for subplan's output */
 	Param	   *param;
 } MinMaxAggInfo;
+
+/*
+ * The aggregate expressions that appear in targetlist and having clauses
+ */
+typedef struct AggClauseInfo
+{
+	pg_node_attr(no_read, no_query_jumble)
+
+	NodeTag		type;
+
+	/* the Aggref expr */
+	Aggref	   *aggref;
+
+	/* lowest level we can evaluate this aggregate at */
+	Relids		agg_eval_at;
+} AggClauseInfo;
+
+/*
+ * The grouping expressions that appear in grouping clauses
+ */
+typedef struct GroupExprInfo
+{
+	pg_node_attr(no_read, no_query_jumble)
+
+	NodeTag		type;
+
+	/* the represented expression */
+	Expr	   *expr;
+
+	/* the tleSortGroupRef of the corresponding SortGroupClause */
+	Index		sortgroupref;
+
+	/* btree opfamily defining the ordering */
+	Oid			btree_opfamily;
+} GroupExprInfo;
 
 /*
  * At runtime, PARAM_EXEC slots are used to pass values around from one plan
