@@ -41,6 +41,7 @@ AfterTriggersTableData
 AfterTriggersTransData
 Agg
 AggClauseCosts
+AggClauseInfo
 AggInfo
 AggPath
 AggSplit
@@ -1060,6 +1061,7 @@ GrantTargetType
 Group
 GroupByOrdering
 GroupClause
+GroupExprInfo
 GroupPath
 GroupPathExtraData
 GroupResultPath
