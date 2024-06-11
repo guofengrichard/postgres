@@ -1291,7 +1291,6 @@ Join
 JoinCostWorkspace
 JoinDomain
 JoinExpr
-JoinHashEntry
 JoinPath
 JoinPathExtraData
 JoinState
@@ -2377,6 +2376,8 @@ RelFileNumber
 RelIdCacheEnt
 RelInfo
 RelInfoArr
+RelInfoEntry
+RelInfoList
 RelMapFile
 RelMapping
 RelOptInfo
