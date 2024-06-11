@@ -390,8 +390,11 @@ struct PlannerInfo
 	/* list of AggClauseInfos */
 	List	   *agg_clause_list;
 
-	/* List of GroupExprInfos */
+	/* list of GroupExprInfos */
 	List	   *group_expr_list;
+
+	/* list of plain Vars contained in targetlist and havingQual */
+	List	   *tlist_vars;
 
 	/* array of PlaceHolderInfos indexed by phid */
 	struct PlaceHolderInfo **placeholder_array pg_node_attr(read_write_ignore, array_size(placeholder_array_size));
@@ -434,6 +437,12 @@ struct PlannerInfo
 	 * upper rel.
 	 */
 	RelInfoList upper_rels[UPPERREL_FINAL + 1] pg_node_attr(read_write_ignore);
+
+	/*
+	 * list of grouped-relation RelAggInfos, with one instance per item of the
+	 * upper_rels[UPPERREL_PARTIAL_GROUP_AGG] list.
+	 */
+	RelInfoList *agg_info_list;
 
 	/* Result tlists chosen by grouping_planner for upper-stage processing */
 	struct PathTarget *upper_targets[UPPERREL_FINAL + 1] pg_node_attr(read_write_ignore);
