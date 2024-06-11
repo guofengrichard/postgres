@@ -36,13 +36,13 @@
 
 
 /*
- * An entry of a hash table that we use to make lookup for RelOptInfo
- * structures more efficient.
+ * An entry of a hash table that we use to make lookup for RelOptInfo or
+ * RelAggInfo structures more efficient.
  */
 typedef struct RelInfoEntry
 {
 	Relids		relids;			/* hash key --- MUST BE FIRST */
-	RelOptInfo *rel;
+	void	   *data;
 } RelInfoEntry;
 
 static void build_joinrel_tlist(PlannerInfo *root, RelOptInfo *joinrel,
@@ -484,7 +484,7 @@ find_base_rel_ignore_join(PlannerInfo *root, int relid)
 
 /*
  * build_rel_hash
- *	  Construct the auxiliary hash table for relations.
+ *	  Construct the auxiliary hash table for relation-specific entries.
  */
 static void
 build_rel_hash(RelInfoList *list)
@@ -504,19 +504,27 @@ build_rel_hash(RelInfoList *list)
 						  &hash_ctl,
 						  HASH_ELEM | HASH_FUNCTION | HASH_COMPARE | HASH_CONTEXT);
 
-	/* Insert all the already-existing relations */
+	/* Insert all the already-existing relation-specific entries */
 	foreach(l, list->items)
 	{
-		RelOptInfo *rel = (RelOptInfo *) lfirst(l);
+		void	   *item = lfirst(l);
 		RelInfoEntry *hentry;
 		bool		found;
+		Relids		relids;
+
+		Assert(IsA(item, RelOptInfo) || IsA(item, RelAggInfo));
+
+		if (IsA(item, RelOptInfo))
+			relids = ((RelOptInfo *) item)->relids;
+		else
+			relids = ((RelAggInfo *) item)->relids;
 
 		hentry = (RelInfoEntry *) hash_search(hashtab,
-											  &(rel->relids),
+											  &relids,
 											  HASH_ENTER,
 											  &found);
 		Assert(!found);
-		hentry->rel = rel;
+		hentry->data = item;
 	}
 
 	list->hash = hashtab;
@@ -524,9 +532,9 @@ build_rel_hash(RelInfoList *list)
 
 /*
  * find_rel_info
- *	  Find an RelOptInfo entry.
+ *	  Find a RelOptInfo or a RelAggInfo entry.
  */
-static RelOptInfo *
+static void *
 find_rel_info(RelInfoList *list, Relids relids)
 {
 	if (list == NULL)
@@ -557,7 +565,7 @@ find_rel_info(RelInfoList *list, Relids relids)
 											  HASH_FIND,
 											  NULL);
 		if (hentry)
-			return hentry->rel;
+			return hentry->data;
 	}
 	else
 	{
@@ -565,10 +573,18 @@ find_rel_info(RelInfoList *list, Relids relids)
 
 		foreach(l, list->items)
 		{
-			RelOptInfo *rel = (RelOptInfo *) lfirst(l);
+			void	   *item = lfirst(l);
+			Relids		item_relids;
 
-			if (bms_equal(rel->relids, relids))
-				return rel;
+			Assert(IsA(item, RelOptInfo) || IsA(item, RelAggInfo));
+
+			if (IsA(item, RelOptInfo))
+				item_relids = ((RelOptInfo *) item)->relids;
+			else if (IsA(item, RelAggInfo))
+				item_relids = ((RelAggInfo *) item)->relids;
+
+			if (bms_equal(item_relids, relids))
+				return item;
 		}
 	}
 
@@ -583,44 +599,46 @@ find_rel_info(RelInfoList *list, Relids relids)
 RelOptInfo *
 find_join_rel(PlannerInfo *root, Relids relids)
 {
-	return find_rel_info(root->join_rel_list, relids);
+	return (RelOptInfo *) find_rel_info(root->join_rel_list, relids);
 }
 
 /*
- * add_rel_info
- *		Add given relation to the given list. Also add it to the auxiliary
- *		hashtable if there is one.
+ * find_grouped_rel
+ *	  Returns relation entry corresponding to 'relids' (a set of RT indexes),
+ *	  or NULL if none exists.  This is for grouped relations.
+ *
+ * If agg_info_p is not NULL, then also the corresponding RelAggInfo (if one
+ * exists) will be returned in *agg_info_p.
  */
-static void
-add_rel_info(RelInfoList *list, RelOptInfo *rel)
+RelOptInfo *
+find_grouped_rel(PlannerInfo *root, Relids relids, RelAggInfo **agg_info_p)
 {
-	/* GEQO requires us to append the new relation to the end of the list! */
-	list->items = lappend(list->items, rel);
+	RelOptInfo *rel;
 
-	/* store it into the auxiliary hashtable if there is one. */
-	if (list->hash)
+	rel = (RelOptInfo *) find_rel_info(&root->upper_rels[UPPERREL_PARTIAL_GROUP_AGG],
+									   relids);
+	if (rel == NULL)
 	{
-		RelInfoEntry *hentry;
-		bool		found;
+		if (agg_info_p)
+			*agg_info_p = NULL;
 
-		hentry = (RelInfoEntry *) hash_search(list->hash,
-											  &(rel->relids),
-											  HASH_ENTER,
-											  &found);
-		Assert(!found);
-		hentry->rel = rel;
+		return NULL;
 	}
-}
 
-/*
- * add_join_rel
- *		Add given join relation to the list of join relations in the given
- *		PlannerInfo.
- */
-static void
-add_join_rel(PlannerInfo *root, RelOptInfo *joinrel)
-{
-	add_rel_info(root->join_rel_list, joinrel);
+	/* also return the corresponding RelAggInfo, if asked */
+	if (agg_info_p)
+	{
+		RelAggInfo *agg_info;
+
+		agg_info = (RelAggInfo *) find_rel_info(root->agg_info_list, relids);
+
+		/* The relation exists, so the agg_info should be there too. */
+		Assert(agg_info != NULL);
+
+		*agg_info_p = agg_info;
+	}
+
+	return rel;
 }
 
 /*
@@ -670,6 +688,64 @@ set_foreign_rel_properties(RelOptInfo *joinrel, RelOptInfo *outer_rel,
 			joinrel->fdwroutine = outer_rel->fdwroutine;
 		}
 	}
+}
+
+/*
+ * add_rel_info
+ *		Add relation-specific entry to a list, and also add it to the auxiliary
+ *		hashtable if there is one.
+ */
+static void
+add_rel_info(RelInfoList *list, void *data)
+{
+	Assert(IsA(data, RelOptInfo) || IsA(data, RelAggInfo));
+
+	/* GEQO requires us to append the new relation to the end of the list! */
+	list->items = lappend(list->items, data);
+
+	/* store it into the auxiliary hashtable if there is one. */
+	if (list->hash)
+	{
+		RelInfoEntry *hentry;
+		bool		found;
+		Relids		relids;
+
+		if (IsA(data, RelOptInfo))
+			relids = ((RelOptInfo *) data)->relids;
+		else
+			relids = ((RelAggInfo *) data)->relids;
+
+		hentry = (RelInfoEntry *) hash_search(list->hash,
+											  &relids,
+											  HASH_ENTER,
+											  &found);
+		Assert(!found);
+		hentry->data = data;
+	}
+}
+
+/*
+ * add_join_rel
+ *		Add given join relation to the list of join relations in the given
+ *		PlannerInfo.
+ */
+static void
+add_join_rel(PlannerInfo *root, RelOptInfo *joinrel)
+{
+	add_rel_info(root->join_rel_list, joinrel);
+}
+
+/*
+ * add_grouped_rel
+ *		Add given grouped relation to the list of grouped relations in the
+ *		given PlannerInfo.  Also add the corresponding RelAggInfo to
+ *		root->agg_info_list.
+ */
+void
+add_grouped_rel(PlannerInfo *root, RelOptInfo *rel, RelAggInfo *agg_info)
+{
+	add_rel_info(&root->upper_rels[UPPERREL_PARTIAL_GROUP_AGG], rel);
+	add_rel_info(root->agg_info_list, agg_info);
 }
 
 /*
@@ -1491,7 +1567,7 @@ fetch_upper_rel(PlannerInfo *root, UpperRelationKind kind, Relids relids)
 	/* If we already made this upperrel for the query, return it */
 	if (list)
 	{
-		upperrel = find_rel_info(list, relids);
+		upperrel = (RelOptInfo *) find_rel_info(list, relids);
 		if (upperrel)
 			return upperrel;
 	}

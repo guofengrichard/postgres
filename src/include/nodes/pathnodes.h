@@ -1080,6 +1080,62 @@ typedef struct RelOptInfo
 	 (rel)->part_rels && (rel)->partexprs && (rel)->nullable_partexprs)
 
 /*
+ * RelAggInfo
+ *		Information needed to create grouped paths for base and join rels.
+ *
+ * "relids" is the set of relation identifiers (RT indexes).
+ *
+ * "target" is the output tlist for the grouped paths.
+ *
+ * "agg_input" is the output tlist for the paths that provide input to the
+ * grouped paths.  One difference from the reltarget of the non-grouped
+ * relation is that agg_input has its sortgrouprefs[] initialized.
+ *
+ * "grouped_rows" is the estimated number of result tuples of the grouped
+ * relation.
+ *
+ * "group_clauses", "group_exprs" and "group_pathkeys" are lists of
+ * SortGroupClauses, the corresponding grouping expressions and PathKeys
+ * respectively.
+ *
+ * "agg_exprs" is a list of Aggref nodes for the aggregation of the relation's
+ * paths.
+ */
+typedef struct RelAggInfo
+{
+	pg_node_attr(no_copy_equal, no_read, no_query_jumble)
+
+	NodeTag		type;
+
+	/* set of base + OJ relids (rangetable indexes) */
+	Relids		relids;
+
+	/*
+	 * default result targetlist for Paths scanning this grouped relation;
+	 * list of Vars/Exprs, cost, width
+	 */
+	struct PathTarget *target;
+
+	/*
+	 * the targetlist for Paths that provide input to the grouped paths
+	 */
+	struct PathTarget *agg_input;
+
+	/* estimated number of result tuples */
+	Cardinality grouped_rows;
+
+	/* a list of SortGroupClauses */
+	List	   *group_clauses;
+	/* a list of grouping expressions */
+	List	   *group_exprs;
+	/* a list of PathKeys */
+	List	   *group_pathkeys;
+
+	/* a list of Aggref nodes */
+	List	   *agg_exprs;
+} RelAggInfo;
+
+/*
  * IndexOptInfo
  *		Per-index information for planning/optimization
  *

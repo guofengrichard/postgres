@@ -2370,6 +2370,7 @@ ReindexObjectType
 ReindexParams
 ReindexStmt
 ReindexType
+RelAggInfo
 RelFileLocator
 RelFileLocatorBackend
 RelFileNumber
