@@ -5468,6 +5468,21 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-enable-eager-aggregate" xreflabel="enable_eager_aggregate">
+      <term><varname>enable_eager_aggregate</varname> (<type>boolean</type>)
+      <indexterm>
+       <primary><varname>enable_eager_aggregate</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Enables or disables the query planner's ability to partially push
+        aggregation past a join, and finalize it once all the relations are
+        joined. The default is <literal>off</literal>.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-enable-gathermerge" xreflabel="enable_gathermerge">
       <term><varname>enable_gathermerge</varname> (<type>boolean</type>)
       <indexterm>

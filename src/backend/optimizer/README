@@ -1501,3 +1501,132 @@ breaking down aggregation or grouping over a partitioned relation into
 aggregation or grouping over its partitions is called partitionwise
 aggregation.  Especially when the partition keys match the GROUP BY clause,
 this can be significantly faster than the regular method.
+
+Eager aggregation
+-----------------
+
+Eager aggregation is a query optimization technique that partially
+pushes aggregation past a join, and finalizes it once all the
+relations are joined.  Eager aggregation may reduce the number of
+input rows to the join and thus could result in a better overall plan.
+
+To prove that the transformation is correct, we partition the tables
+in the FROM clause into two groups: those that contain at least one
+aggregation column, and those that do not contain any aggregation
+columns.  Each group can be treated as a single relation formed by the
+Cartesian product of the tables within that group.  Therefore, without
+loss of generality, we can assume that the FROM clause contains
+exactly two relations, R1 and R2, where R1 represents the relation
+containing all aggregation columns, and R2 represents the relation
+without any aggregation columns.
+
+Let the query be of the form:
+
+SELECT G, AGG(A)
+FROM R1 JOIN R2 ON J
+GROUP BY G;
+
+where G is the set of grouping keys that may include columns from R1
+and/or R2; AGG(A) is an aggregate function over columns A from R1; J
+is the join condition between R1 and R2.
+
+The transformation of eager aggregation is:
+
+    GROUP BY G, AGG(A) on (R1 JOIN R2 ON J)
+    =
+    GROUP BY G, AGG(agg_A) on ((GROUP BY G1, AGG(A) AS agg_A on R1) JOIN R2 ON J)
+
+This equivalence holds under the following conditions:
+
+1) AGG is decomposable, meaning that it can be computed in two stages:
+a partial aggregation followed by a final aggregation;
+2) The set G1 used in the pre-aggregation of R1 includes:
+    * all columns from R1 that are part of the grouping keys G, and
+    * all columns from R1 that appear in the join condition J.
+3) The grouping operator for any column in G1 must be compatible with
+the operator used for that column in the join condition J.
+
+Since G1 includes all columns from R1 that appear in either the
+grouping keys G or the join condition J, all rows within each partial
+group have identical values for both the grouping keys and the
+join-relevant columns from R1, assuming compatible operators are used.
+As a result, the rows within a partial group are indistinguishable in
+terms of their contribution to the aggregation and their behavior in
+the join.  This ensures that all rows in the same partial group share
+the same "destiny": they either all match or all fail to match a given
+row in R2.  Because the aggregate function AGG is decomposable,
+aggregating the partial results after the join yields the same final
+result as aggregating after the full join, thereby preserving query
+semantics.  Q.E.D.
+
+For example:
+
+ EXPLAIN (COSTS OFF)
+ SELECT a.i, avg(b.y)
+ FROM a JOIN b ON a.i = b.j
+ GROUP BY a.i;
+
+ Finalize HashAggregate
+   Group Key: a.i
+   ->  Nested Loop
+         ->  Partial HashAggregate
+               Group Key: b.j
+               ->  Seq Scan on b
+         ->  Index Only Scan using a_pkey on a
+               Index Cond: (i = b.j)
+
+If the partial aggregation on table B significantly reduces the number of
+input rows, the join above could be much cheaper, leading to a more efficient
+final plan.
+
+For the partial aggregation that is pushed down to a non-aggregated relation,
+we need to consider all expressions from this relation that are involved in
+upper join clauses and include them in the grouping keys, using compatible
+operators.  This is essential to ensure that an aggregated row from the partial
+aggregation matches the other side of the join if and only if each row in the
+partial group does.  This ensures that all rows within the same partial group
+share the same 'destiny', which is crucial for maintaining correctness.
+
+One restriction is that we cannot push partial aggregation down to a relation
+that is in the nullable side of an outer join, because the NULL-extended rows
+produced by the outer join would not be available when we perform the partial
+aggregation, while with a non-eager-aggregation plan these rows are available
+for the top-level aggregation.  Pushing partial aggregation in this case may
+result in the rows being grouped differently than expected, or produce
+incorrect values from the aggregate functions.
+
+We can also apply eager aggregation to a join:
+
+ EXPLAIN (COSTS OFF)
+ SELECT a.i, avg(b.y + c.z)
+ FROM a JOIN b ON a.i = b.j
+        JOIN c ON b.j = c.i
+ GROUP BY a.i;
+
+ Finalize HashAggregate
+   Group Key: a.i
+   ->  Nested Loop
+         ->  Partial HashAggregate
+               Group Key: b.j
+               ->  Hash Join
+                     Hash Cond: (b.j = c.i)
+                     ->  Seq Scan on b
+                     ->  Hash
+                           ->  Seq Scan on c
+         ->  Index Only Scan using a_pkey on a
+               Index Cond: (i = b.j)
+
+During the construction of the join tree, we evaluate each base or join
+relation to determine if eager aggregation can be applied.  If feasible, we
+create a separate RelOptInfo called a "grouped relation" and generate grouped
+paths by adding sorted and hashed partial aggregation paths on top of the
+non-grouped paths.  To limit planning time, we consider only the cheapest or
+suitably-sorted non-grouped paths in this step.
+
+Another way to generate grouped paths is to join a grouped relation with a
+non-grouped relation.  Joining two grouped relations does not seem to be very
+useful and is currently not supported.
+
+If we have generated a grouped relation for the topmost join relation, we need
+to finalize its paths at the end.  The final paths will compete in the usual
+way with paths built from regular planning.
