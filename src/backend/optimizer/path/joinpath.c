@@ -24,6 +24,7 @@
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/planmain.h"
+#include "utils/lsyscache.h"
 #include "utils/typcache.h"
 
 /* Hook for plugins to get control in add_paths_to_joinrel() */
@@ -2131,6 +2132,17 @@ hash_inner_and_outer(PlannerInfo *root,
 		if (!clause_sides_match_join(restrictinfo, outerrel, innerrel))
 			continue;			/* no good for these input relations */
 
+		/*
+		 * If clause has the form "inner op outer", check if its operator has
+		 * valid commutator.  This is necessary because hashclauses in this
+		 * form will get commuted in createplan.c to put the outer var on the
+		 * left (see get_switched_clauses).  This probably shouldn't ever fail,
+		 * since hashable operators ought to have commutators, but be paranoid.
+		 */
+		if (!restrictinfo->outer_is_left &&
+			!OidIsValid(get_commutator(((OpExpr *) restrictinfo->clause)->opno)))
+			continue;
+
 		hashclauses = lappend(hashclauses, restrictinfo);
 	}
 
@@ -2392,6 +2404,21 @@ select_mergejoin_clauses(PlannerInfo *root,
 		{
 			have_nonmergeable_joinclause = true;
 			continue;			/* no good for these input relations */
+		}
+
+		/*
+		 * If clause has the form "inner op outer", check if its operator has
+		 * valid commutator.  This is necessary because mergejoin clauses in
+		 * this form will get commuted in createplan.c to put the outer var on
+		 * the left (see get_switched_clauses).  This probably shouldn't ever
+		 * fail, since mergejoinable operators ought to have commutators, but
+		 * be paranoid.
+		 */
+		if (!restrictinfo->outer_is_left &&
+			!OidIsValid(get_commutator(((OpExpr *) restrictinfo->clause)->opno)))
+		{
+			have_nonmergeable_joinclause = true;
+			continue;
 		}
 
 		/*

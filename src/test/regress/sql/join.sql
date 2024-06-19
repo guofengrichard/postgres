@@ -2928,3 +2928,62 @@ SELECT t1.a FROM skip_fetch t1 LEFT JOIN skip_fetch t2 ON t2.a = 1 WHERE t2.a IS
 
 RESET enable_indexonlyscan;
 RESET enable_seqscan;
+
+--
+-- test handling of merge/hash clauses that do not have valid commutators
+--
+
+-- There are not (and should not be) any such operators built into Postgres
+-- that are mergejoinable or hashable but have no commutators; so we have to
+-- hack things up to create one.
+
+create type int8nocommutator;
+create function int8nocommutatorin(cstring) returns int8nocommutator
+  strict immutable language internal as 'int8in';
+create function int8nocommutatorout(int8nocommutator) returns cstring
+  strict immutable language internal as 'int8out';
+create type int8nocommutator (
+    input = int8nocommutatorin,
+    output = int8nocommutatorout,
+    like = int8
+);
+
+create function int8nocommutatoreq(int8, int8nocommutator) returns bool
+  strict immutable language internal as 'int8eq';
+create operator = (
+    procedure = int8nocommutatoreq,
+    leftarg = int8, rightarg = int8nocommutator,
+    restrict = eqsel, join = eqjoinsel,
+    hashes, merges
+);
+alter operator family integer_ops using btree add
+  operator 3 = (int8, int8nocommutator);
+
+create function int8nocommutatorlt(int8nocommutator, int8nocommutator) returns bool
+  strict immutable language internal as 'int8lt';
+create operator < (
+    procedure = int8nocommutatorlt,
+    leftarg = int8nocommutator, rightarg = int8nocommutator
+);
+alter operator family integer_ops using btree add
+  operator 1 < (int8nocommutator, int8nocommutator);
+
+create function int8nocommutatorcmp(int8, int8nocommutator) returns int
+  strict immutable language internal as 'btint8cmp';
+alter operator family integer_ops using btree add
+  function 1 int8nocommutatorcmp (int8, int8nocommutator);
+
+create temp table tbl_nocom(a int8, b int8nocommutator);
+
+-- check that non-commutable merge clauses do not lead to error
+set enable_hashjoin to off;
+explain (costs off)
+select * from tbl_nocom t1 full join tbl_nocom t2 on t2.a = t1.b;
+
+-- check that non-commutable hash clauses do not lead to error
+reset enable_hashjoin;
+set enable_mergejoin to off;
+explain (costs off)
+select * from tbl_nocom t1 full join tbl_nocom t2 on t2.a = t1.b;
+
+reset enable_mergejoin;
