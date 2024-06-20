@@ -49,6 +49,10 @@ typedef struct pullup_replace_vars_context
 	RangeTblEntry *target_rte;	/* RTE of subquery */
 	Relids		relids;			/* relids within subquery, as numbered after
 								 * pullup (set only if target_rte->lateral) */
+	Relids		lowest_nullable_relids; /* relids of the nullable side of the
+										 * lowest outer join subquery is
+										 * within (set only if
+										 * target_rte->lateral) */
 	bool	   *outer_hasSubLinks;	/* -> outer query's hasSubLinks */
 	int			varno;			/* varno of subquery */
 	bool		wrap_non_vars;	/* do we need all non-Var outputs to be PHVs? */
@@ -81,10 +85,12 @@ static Node *pull_up_sublinks_qual_recurse(PlannerInfo *root, Node *node,
 										   Node **jtlink2, Relids available_rels2);
 static Node *pull_up_subqueries_recurse(PlannerInfo *root, Node *jtnode,
 										JoinExpr *lowest_outer_join,
+										Node *lowest_nullable_side,
 										AppendRelInfo *containing_appendrel);
 static Node *pull_up_simple_subquery(PlannerInfo *root, Node *jtnode,
 									 RangeTblEntry *rte,
 									 JoinExpr *lowest_outer_join,
+									 Node *lowest_nullable_side,
 									 AppendRelInfo *containing_appendrel);
 static Node *pull_up_simple_union_all(PlannerInfo *root, Node *jtnode,
 									  RangeTblEntry *rte);
@@ -916,7 +922,7 @@ pull_up_subqueries(PlannerInfo *root)
 	/* Recursion starts with no containing join nor appendrel */
 	root->parse->jointree = (FromExpr *)
 		pull_up_subqueries_recurse(root, (Node *) root->parse->jointree,
-								   NULL, NULL);
+								   NULL, NULL, NULL);
 	/* We should still have a FromExpr */
 	Assert(IsA(root->parse->jointree, FromExpr));
 }
@@ -930,6 +936,13 @@ pull_up_subqueries(PlannerInfo *root)
  * If this jointree node is within either side of an outer join, then
  * lowest_outer_join references the lowest such JoinExpr node; otherwise
  * it is NULL.  We use this to constrain the effects of LATERAL subqueries.
+ *
+ * If this jointree node is within the nullable side of an outer join, then
+ * lowest_nullable_side references the nullable side of the lowest such
+ * JoinExpr node; otherwise it is NULL.  We use this to avoid use of the
+ * PlaceHolderVar mechanism for Vars/PHVs that are lateral references to
+ * something outside the subquery being pulled up but the referenced rel is
+ * under the same lowest nulling outer join.
  *
  * If we are looking at a member subquery of an append relation,
  * containing_appendrel describes that relation; else it is NULL.
@@ -947,14 +960,15 @@ pull_up_subqueries(PlannerInfo *root)
  * Notice also that we can't turn pullup_replace_vars loose on the whole
  * jointree, because it'd return a mutated copy of the tree; we have to
  * invoke it just on the quals, instead.  This behavior is what makes it
- * reasonable to pass lowest_outer_join as a pointer rather than some
- * more-indirect way of identifying the lowest OJ.  Likewise, we don't
- * replace append_rel_list members but only their substructure, so the
- * containing_appendrel reference is safe to use.
+ * reasonable to pass lowest_outer_join and lowest_nullable_side as pointers
+ * rather than some more-indirect way of identifying the lowest OJ.  Likewise,
+ * we don't replace append_rel_list members but only their substructure, so
+ * the containing_appendrel reference is safe to use.
  */
 static Node *
 pull_up_subqueries_recurse(PlannerInfo *root, Node *jtnode,
 						   JoinExpr *lowest_outer_join,
+						   Node *lowest_nullable_side,
 						   AppendRelInfo *containing_appendrel)
 {
 	/* Since this function recurses, it could be driven to stack overflow. */
@@ -981,6 +995,7 @@ pull_up_subqueries_recurse(PlannerInfo *root, Node *jtnode,
 			 is_safe_append_member(rte->subquery)))
 			return pull_up_simple_subquery(root, jtnode, rte,
 										   lowest_outer_join,
+										   lowest_nullable_side,
 										   containing_appendrel);
 
 		/*
@@ -1028,6 +1043,7 @@ pull_up_subqueries_recurse(PlannerInfo *root, Node *jtnode,
 		{
 			lfirst(l) = pull_up_subqueries_recurse(root, lfirst(l),
 												   lowest_outer_join,
+												   lowest_nullable_side,
 												   NULL);
 		}
 	}
@@ -1042,9 +1058,11 @@ pull_up_subqueries_recurse(PlannerInfo *root, Node *jtnode,
 			case JOIN_INNER:
 				j->larg = pull_up_subqueries_recurse(root, j->larg,
 													 lowest_outer_join,
+													 lowest_nullable_side,
 													 NULL);
 				j->rarg = pull_up_subqueries_recurse(root, j->rarg,
 													 lowest_outer_join,
+													 lowest_nullable_side,
 													 NULL);
 				break;
 			case JOIN_LEFT:
@@ -1052,25 +1070,31 @@ pull_up_subqueries_recurse(PlannerInfo *root, Node *jtnode,
 			case JOIN_ANTI:
 				j->larg = pull_up_subqueries_recurse(root, j->larg,
 													 j,
+													 lowest_nullable_side,
 													 NULL);
 				j->rarg = pull_up_subqueries_recurse(root, j->rarg,
 													 j,
+													 j->rarg,
 													 NULL);
 				break;
 			case JOIN_FULL:
 				j->larg = pull_up_subqueries_recurse(root, j->larg,
 													 j,
+													 j->larg,
 													 NULL);
 				j->rarg = pull_up_subqueries_recurse(root, j->rarg,
 													 j,
+													 j->rarg,
 													 NULL);
 				break;
 			case JOIN_RIGHT:
 				j->larg = pull_up_subqueries_recurse(root, j->larg,
 													 j,
+													 j->larg,
 													 NULL);
 				j->rarg = pull_up_subqueries_recurse(root, j->rarg,
 													 j,
+													 lowest_nullable_side,
 													 NULL);
 				break;
 			default:
@@ -1100,6 +1124,7 @@ pull_up_subqueries_recurse(PlannerInfo *root, Node *jtnode,
 static Node *
 pull_up_simple_subquery(PlannerInfo *root, Node *jtnode, RangeTblEntry *rte,
 						JoinExpr *lowest_outer_join,
+						Node *lowest_nullable_side,
 						AppendRelInfo *containing_appendrel)
 {
 	Query	   *parse = root->parse;
@@ -1259,10 +1284,20 @@ pull_up_simple_subquery(PlannerInfo *root, Node *jtnode, RangeTblEntry *rte,
 	rvcontext.targetlist = subquery->targetList;
 	rvcontext.target_rte = rte;
 	if (rte->lateral)
+	{
 		rvcontext.relids = get_relids_in_jointree((Node *) subquery->jointree,
 												  true, true);
+		rvcontext.lowest_nullable_relids =
+			lowest_nullable_side ?
+			get_relids_in_jointree(lowest_nullable_side,
+								   true,
+								   true) : NULL;
+	}
 	else						/* won't need relids */
+	{
 		rvcontext.relids = NULL;
+		rvcontext.lowest_nullable_relids = NULL;
+	}
 	rvcontext.outer_hasSubLinks = &parse->hasSubLinks;
 	rvcontext.varno = varno;
 	/* this flag will be set below, if needed */
@@ -1563,7 +1598,7 @@ pull_up_union_leaf_queries(Node *setOp, PlannerInfo *root, int parentRTindex,
 		rtr = makeNode(RangeTblRef);
 		rtr->rtindex = childRTindex;
 		(void) pull_up_subqueries_recurse(root, (Node *) rtr,
-										  NULL, appinfo);
+										  NULL, NULL, appinfo);
 	}
 	else if (IsA(setOp, SetOperationStmt))
 	{
@@ -1810,6 +1845,7 @@ pull_up_simple_values(PlannerInfo *root, Node *jtnode, RangeTblEntry *rte)
 	rvcontext.targetlist = tlist;
 	rvcontext.target_rte = rte;
 	rvcontext.relids = NULL;
+	rvcontext.lowest_nullable_relids = NULL;
 	rvcontext.outer_hasSubLinks = &parse->hasSubLinks;
 	rvcontext.varno = varno;
 	rvcontext.wrap_non_vars = false;
@@ -1971,9 +2007,10 @@ pull_up_constant_function(PlannerInfo *root, Node *jtnode,
 	/*
 	 * Since this function was reduced to a Const, it doesn't contain any
 	 * lateral references, even if it's marked as LATERAL.  This means we
-	 * don't need to fill relids.
+	 * don't need to fill relids and lowest_nullable_relids.
 	 */
 	rvcontext.relids = NULL;
+	rvcontext.lowest_nullable_relids = NULL;
 
 	rvcontext.outer_hasSubLinks = &parse->hasSubLinks;
 	rvcontext.varno = ((RangeTblRef *) jtnode)->rtindex;
@@ -2571,12 +2608,13 @@ pullup_replace_vars_callback(Var *var,
 				/*
 				 * Simple Vars always escape being wrapped, unless they are
 				 * lateral references to something outside the subquery being
-				 * pulled up.  (Even then, we could omit the PlaceHolderVar if
-				 * the referenced rel is under the same lowest outer join, but
-				 * it doesn't seem worth the trouble to check that.)
+				 * pulled up and the referenced rel is not under the same
+				 * lowest nulling outer join.
 				 */
 				if (rcon->target_rte->lateral &&
-					!bms_is_member(((Var *) newnode)->varno, rcon->relids))
+					!bms_is_member(((Var *) newnode)->varno, rcon->relids) &&
+					!bms_is_member(((Var *) newnode)->varno,
+								   rcon->lowest_nullable_relids))
 					wrap = true;
 				else
 					wrap = false;
@@ -2587,7 +2625,9 @@ pullup_replace_vars_callback(Var *var,
 				/* The same rules apply for a PlaceHolderVar */
 				if (rcon->target_rte->lateral &&
 					!bms_is_subset(((PlaceHolderVar *) newnode)->phrels,
-								   rcon->relids))
+								   rcon->relids) &&
+					!bms_is_subset(((PlaceHolderVar *) newnode)->phrels,
+								   rcon->lowest_nullable_relids))
 					wrap = true;
 				else
 					wrap = false;
