@@ -2442,6 +2442,14 @@ pullup_replace_vars_callback(Var *var,
 				make_placeholder_expr(rcon->root,
 									  (Expr *) newnode,
 									  bms_make_singleton(rcon->varno));
+
+			/*
+			 * If the PHV is used to isolate subexpressions, mark it as
+			 * needing to be kept.
+			 */
+			if (rcon->wrap_non_vars)
+				((PlaceHolderVar *) newnode)->needkeep = true;
+
 			/* cache it with the PHV, and with phlevelsup etc not set yet */
 			rcon->rv_cache[InvalidAttrNumber] = copyObject(newnode);
 		}
@@ -2462,6 +2470,7 @@ pullup_replace_vars_callback(Var *var,
 		if (need_phv)
 		{
 			bool		wrap;
+			bool		isolate_exprs = false;
 
 			if (newnode && IsA(newnode, Var) &&
 				((Var *) newnode)->varlevelsup == 0)
@@ -2494,6 +2503,7 @@ pullup_replace_vars_callback(Var *var,
 			{
 				/* Caller told us to wrap all non-Vars in a PlaceHolderVar */
 				wrap = true;
+				isolate_exprs = true;
 			}
 			else
 			{
@@ -2540,6 +2550,13 @@ pullup_replace_vars_callback(Var *var,
 					make_placeholder_expr(rcon->root,
 										  (Expr *) newnode,
 										  bms_make_singleton(rcon->varno));
+
+				/*
+				 * If the PHV is used to isolate subexpressions, mark it as
+				 * needing to be kept.
+				 */
+				if (isolate_exprs)
+					((PlaceHolderVar *) newnode)->needkeep = true;
 
 				/*
 				 * Cache it if possible (ie, if the attno is in range, which

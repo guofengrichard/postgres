@@ -2758,6 +2758,10 @@ typedef struct MergeScanSelCache
  * level of a PlaceHolderVar might be a join rather than a base relation.
  * Likewise, phnullingrels corresponds to varnullingrels.
  *
+ * needkeep indicates whether the PHV needs to be kept when its phnullingrels
+ * becomes empty.  This is set true in cases where the PHV is used to isolate
+ * subexpressions; see wrap_non_vars usages in prepjointree.c.
+ *
  * Although the planner treats this as an expression node type, it is not
  * recognized by the parser or executor, so we declare it here rather than
  * in primnodes.h.
@@ -2796,6 +2800,9 @@ typedef struct PlaceHolderVar
 
 	/* > 0 if PHV belongs to outer query */
 	Index		phlevelsup;
+
+	/* true if PHV needs to be kept */
+	bool		needkeep;
 } PlaceHolderVar;
 
 /*

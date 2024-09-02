@@ -87,8 +87,13 @@ make_restrictinfo(PlannerInfo *root,
 													   incompatible_relids,
 													   outer_relids);
 
-	/* Shouldn't be an AND clause, else AND/OR flattening messed up */
-	Assert(!is_andclause(clause));
+	/*
+	 * XXX Normally it shouldn't be an AND clause, else AND/OR flattening
+	 * messed up.  An exception occurs if the clause was initially wrapped in
+	 * a PlaceHolderVar and the PlaceHolderVar is removed afterward.  In this
+	 * case the clause may not have been processed for AND/OR flattening by
+	 * preprocess_expression.
+	 */
 
 	return make_restrictinfo_internal(root,
 									  clause,
