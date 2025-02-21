@@ -732,3 +732,41 @@ CREATE TABLE gtest28b (LIKE gtest28a INCLUDING GENERATED);
 
 -- sanity check of system catalog
 SELECT attrelid, attname, attgenerated FROM pg_attribute WHERE attgenerated NOT IN ('', 's', 'v');
+
+--
+-- test the expansion of virtual generated columns
+--
+
+create table gtest32 (
+  a int,
+  b int generated always as (a * 2),
+  c int generated always as (10 + 10),
+  d int generated always as (coalesce(a, 100))
+);
+
+insert into gtest32 values (1), (2);
+
+-- Ensure that nullingrel bits are propagated into the generation expression
+explain (costs off)
+select sum(t2.b) over (partition by t2.a),
+       sum(t2.c) over (partition by t2.a),
+       sum(t2.d) over (partition by t2.a)
+from gtest32 as t1 left join gtest32 as t2 on (t1.a = t2.a)
+order by t1.a;
+
+select sum(t2.b) over (partition by t2.a),
+       sum(t2.c) over (partition by t2.a),
+       sum(t2.d) over (partition by t2.a)
+from gtest32 as t1 left join gtest32 as t2 on (t1.a = t2.a)
+order by t1.a;
+
+-- Ensure that the generation expressions are wrapped into PHVs if needed
+explain (verbose, costs off)
+select t2.* from gtest32 t1 left join gtest32 t2 on false;
+select t2.* from gtest32 t1 left join gtest32 t2 on false;
+
+explain (verbose, costs off)
+select * from gtest32 t group by grouping sets (a, b, c, d) having c = 20;
+select * from gtest32 t group by grouping sets (a, b, c, d) having c = 20;
+
+drop table gtest32;
