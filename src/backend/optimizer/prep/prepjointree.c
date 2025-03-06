@@ -1435,16 +1435,6 @@ pull_up_simple_subquery(PlannerInfo *root, Node *jtnode, RangeTblEntry *rte,
 								 sizeof(Node *));
 
 	/*
-	 * If we are dealing with an appendrel member then anything that's not a
-	 * simple Var has to be turned into a PlaceHolderVar.  We force this to
-	 * ensure that what we pull up doesn't get merged into a surrounding
-	 * expression during later processing and then fail to match the
-	 * expression actually available from the appendrel.
-	 */
-	if (containing_appendrel != NULL)
-		rvcontext.wrap_non_vars = true;
-
-	/*
 	 * If the parent query uses grouping sets, we need a PlaceHolderVar for
 	 * anything that's not a simple Var.  Again, this ensures that expressions
 	 * retain their separate identity so that they will match grouping set
@@ -2152,14 +2142,6 @@ pull_up_constant_function(PlannerInfo *root, Node *jtnode,
 	/* initialize cache array with indexes 0 .. length(tlist) */
 	rvcontext.rv_cache = palloc0((list_length(rvcontext.targetlist) + 1) *
 								 sizeof(Node *));
-
-	/*
-	 * If we are dealing with an appendrel member then anything that's not a
-	 * simple Var has to be turned into a PlaceHolderVar.  (See comments in
-	 * pull_up_simple_subquery().)
-	 */
-	if (containing_appendrel != NULL)
-		rvcontext.wrap_non_vars = true;
 
 	/*
 	 * If the parent query uses grouping sets, we need a PlaceHolderVar for
