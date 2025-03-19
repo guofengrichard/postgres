@@ -466,8 +466,7 @@ expand_single_inheritance_child(PlannerInfo *root, RangeTblEntry *parentrte,
 								Index *childRTindex_p)
 {
 	Query	   *parse = root->parse;
-	Oid			parentOID PG_USED_FOR_ASSERTS_ONLY =
-		RelationGetRelid(parentrel);
+	Oid			parentOID = RelationGetRelid(parentrel);
 	Oid			childOID = RelationGetRelid(childrel);
 	RangeTblEntry *childrte;
 	Index		childRTindex;
@@ -479,15 +478,16 @@ expand_single_inheritance_child(PlannerInfo *root, RangeTblEntry *parentrte,
 	/*
 	 * Build an RTE for the child, and attach to query's rangetable list. We
 	 * copy most scalar fields of the parent's RTE, but replace relation OID,
-	 * relkind, and inh for the child.  Set the child's securityQuals to
-	 * empty, because we only want to apply the parent's RLS conditions
-	 * regardless of what RLS properties individual children may have. (This
-	 * is an intentional choice to make inherited RLS work like regular
-	 * permissions checks.) The parent securityQuals will be propagated to
-	 * children along with other base restriction clauses, so we don't need to
-	 * do it here.  Other infrastructure of the parent RTE has to be
-	 * translated to match the child table's column ordering, which we do
-	 * below, so a "flat" copy is sufficient to start with.
+	 * relkind, and inh for the child.  We also replace notnullattnums for the
+	 * child if its relation OID is different from the parent's.  Set the
+	 * child's securityQuals to empty, because we only want to apply the
+	 * parent's RLS conditions regardless of what RLS properties individual
+	 * children may have. (This is an intentional choice to make inherited RLS
+	 * work like regular permissions checks.) The parent securityQuals will be
+	 * propagated to children along with other base restriction clauses, so we
+	 * don't need to do it here.  Other infrastructure of the parent RTE has
+	 * to be translated to match the child table's column ordering, which we
+	 * do below, so a "flat" copy is sufficient to start with.
 	 */
 	childrte = makeNode(RangeTblEntry);
 	memcpy(childrte, parentrte, sizeof(RangeTblEntry));
@@ -506,6 +506,10 @@ expand_single_inheritance_child(PlannerInfo *root, RangeTblEntry *parentrte,
 
 	/* No permission checking for child RTEs. */
 	childrte->perminfoindex = 0;
+
+	/* Record NOT NULL columns for the child if needed. */
+	if (childOID != parentOID)
+		get_relation_notnullatts(childrel, childrte);
 
 	/* Link not-yet-fully-filled child RTE into data structures */
 	parse->rtable = lappend(parse->rtable, childrte);

@@ -20,6 +20,7 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "catalog/pg_class.h"
 #include "catalog/pg_language.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_proc.h"
@@ -41,6 +42,7 @@
 #include "parser/analyze.h"
 #include "parser/parse_coerce.h"
 #include "parser/parse_func.h"
+#include "parser/parsetree.h"
 #include "rewrite/rewriteHandler.h"
 #include "rewrite/rewriteManip.h"
 #include "tcop/tcopprot.h"
@@ -2240,7 +2242,8 @@ rowtype_field_matches(Oid rowtypeid, int fieldnum,
  * only operators and functions that are reasonable to try to execute.
  *
  * NOTE: "root" can be passed as NULL if the caller never wants to do any
- * Param substitutions nor receive info about inlined functions.
+ * Param substitutions nor receive info about inlined functions nor reduce
+ * NullTest for Vars to constant true or constant false.
  *
  * NOTE: the planner assumes that this will always flatten nested AND and
  * OR clauses into N-argument form.  See comments in prepqual.c.
@@ -3535,6 +3538,31 @@ eval_const_expressions_mutator(Node *node,
 
 					return makeBoolConst(result, false);
 				}
+				if (!ntest->argisrow && arg && IsA(arg, Var) && context->root)
+				{
+					Var		   *varg = (Var *) arg;
+					bool		result;
+
+					if (var_is_nonnullable(context->root, varg))
+					{
+						switch (ntest->nulltesttype)
+						{
+							case IS_NULL:
+								result = false;
+								break;
+							case IS_NOT_NULL:
+								result = true;
+								break;
+							default:
+								elog(ERROR, "unrecognized nulltesttype: %d",
+									 (int) ntest->nulltesttype);
+								result = false; /* keep compiler quiet */
+								break;
+						}
+
+						return makeBoolConst(result, false);
+					}
+				}
 
 				newntest = makeNode(NullTest);
 				newntest->arg = (Expr *) arg;
@@ -4151,6 +4179,49 @@ simplify_function(Oid funcid, Oid result_type, int32 result_typmod,
 	ReleaseSysCache(func_tuple);
 
 	return newexpr;
+}
+
+/*
+ * var_is_nonnullable
+ *	  Check to see if the Var cannot be NULL
+ *
+ * If the Var is defined NOT NULL and meanwhile is not nulled by any outer
+ * joins or grouping sets, then we can know that it cannot be NULL.
+ */
+bool
+var_is_nonnullable(PlannerInfo *root, Var *var)
+{
+	RangeTblEntry *rte;
+
+	Assert(IsA(var, Var));
+
+	/* skip upper-level Vars */
+	if (var->varlevelsup != 0)
+		return false;
+
+	/* could the Var be nulled by any outer joins or grouping sets? */
+	if (!bms_is_empty(var->varnullingrels))
+		return false;
+
+	/* system columns cannot be NULL */
+	if (var->varattno < 0)
+		return true;
+
+	/*
+	 * Check if the Var is defined as NOT NULL.  We must skip inheritance
+	 * parent tables, as some child tables may have a NOT NULL constraint for
+	 * a column while others may not.  This cannot happen with partitioned
+	 * tables, though.
+	 */
+	rte = planner_rt_fetch(var->varno, root);
+	if (rte->inh && rte->relkind != RELKIND_PARTITIONED_TABLE)
+		return false;
+
+	if (var->varattno > 0 &&
+		bms_is_member(var->varattno, rte->notnullattnums))
+		return true;
+
+	return false;
 }
 
 /*

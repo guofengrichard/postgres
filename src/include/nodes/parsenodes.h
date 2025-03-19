@@ -1080,6 +1080,9 @@ typedef struct RangeTblEntry
 	 * this RTE in the containing struct's list of same; 0 if permissions need
 	 * not be checked for this RTE.
 	 *
+	 * notnullattnums is zero-based set containing attnums of NOT NULL
+	 * columns.
+	 *
 	 * As a special case, relid, relkind, rellockmode, and perminfoindex can
 	 * also be set (nonzero) in an RTE_SUBQUERY RTE.  This occurs when we
 	 * convert an RTE_RELATION RTE naming a view into an RTE_SUBQUERY
@@ -1105,6 +1108,8 @@ typedef struct RangeTblEntry
 	Index		perminfoindex pg_node_attr(query_jumble_ignore);
 	/* sampling info, or NULL */
 	struct TableSampleClause *tablesample;
+	/* columns defined as NOT NULL */
+	Bitmapset  *notnullattnums;
 
 	/*
 	 * Fields valid for a subquery RTE (else NULL):

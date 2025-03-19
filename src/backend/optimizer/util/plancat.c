@@ -163,36 +163,6 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 		palloc0((rel->max_attr - rel->min_attr + 1) * sizeof(int32));
 
 	/*
-	 * Record which columns are defined as NOT NULL.  We leave this
-	 * unpopulated for non-partitioned inheritance parent relations as it's
-	 * ambiguous as to what it means.  Some child tables may have a NOT NULL
-	 * constraint for a column while others may not.  We could work harder and
-	 * build a unioned set of all child relations notnullattnums, but there's
-	 * currently no need.  The RelOptInfo corresponding to the !inh
-	 * RangeTblEntry does get populated.
-	 */
-	if (!inhparent || relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
-	{
-		for (int i = 0; i < relation->rd_att->natts; i++)
-		{
-			CompactAttribute *attr = TupleDescCompactAttr(relation->rd_att, i);
-
-			if (attr->attnotnull)
-			{
-				rel->notnullattnums = bms_add_member(rel->notnullattnums,
-													 i + 1);
-
-				/*
-				 * Per RemoveAttributeById(), dropped columns will have their
-				 * attnotnull unset, so we needn't check for dropped columns
-				 * in the above condition.
-				 */
-				Assert(!attr->attisdropped);
-			}
-		}
-	}
-
-	/*
 	 * Estimate relation size --- unless it's an inheritance parent, in which
 	 * case the size we want is not the rel's own size but the size of its
 	 * inheritance tree.  That will be computed in set_append_rel_size().
@@ -677,6 +647,39 @@ get_relation_foreign_keys(PlannerInfo *root, RelOptInfo *rel,
 			memset(info->rinfos, 0, sizeof(info->rinfos));
 
 			root->fkey_list = lappend(root->fkey_list, info);
+		}
+	}
+}
+
+/*
+ * get_relation_notnullatts
+ *		Record which columns of the given relation are defined as NOT NULL.
+ */
+void
+get_relation_notnullatts(Relation relation, RangeTblEntry *rte)
+{
+	Assert(rte->rtekind == RTE_RELATION);
+
+	rte->notnullattnums = NULL;
+
+	if (relation->rd_att->constr && relation->rd_att->constr->has_not_null)
+	{
+		for (int i = 0; i < relation->rd_att->natts; i++)
+		{
+			CompactAttribute *attr = TupleDescCompactAttr(relation->rd_att, i);
+
+			if (attr->attnotnull)
+			{
+				rte->notnullattnums = bms_add_member(rte->notnullattnums,
+													 i + 1);
+
+				/*
+				 * Per RemoveAttributeById(), dropped columns will have their
+				 * attnotnull unset, so we needn't check for dropped columns
+				 * in the above condition.
+				 */
+				Assert(!attr->attisdropped);
+			}
 		}
 	}
 }

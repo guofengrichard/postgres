@@ -724,6 +724,15 @@ subquery_planner(PlannerGlobal *glob, Query *parse, PlannerInfo *parent_root,
 	replace_empty_jointree(parse);
 
 	/*
+	 * Scan the query's rangetable for ordinary relations and retrieve
+	 * attribute information from the system catalogs for each of them.  Note
+	 * that this step does not descend into SubLinks and subqueries; if we
+	 * pull up any SubLinks or subqueries below, their rangetables are scanned
+	 * just before pulling them up.
+	 */
+	collect_relation_attrs(parse);
+
+	/*
 	 * Look for ANY and EXISTS SubLinks in WHERE and JOIN/ON clauses, and try
 	 * to transform them into joins.  Note that this step does not descend
 	 * into subqueries; if we pull up any subqueries below, their SubLinks are

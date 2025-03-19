@@ -1441,6 +1441,12 @@ convert_EXISTS_sublink_to_join(PlannerInfo *root, SubLink *sublink,
 	replace_empty_jointree(subselect);
 
 	/*
+	 * Scan the subquery's rangetable for ordinary relations and retrieve
+	 * attribute information from the system catalogs for each of them.
+	 */
+	collect_relation_attrs(subselect);
+
+	/*
 	 * Prepare to pull up the sub-select into top range table.
 	 *
 	 * We rely here on the assumption that the outer query has no references
@@ -1652,6 +1658,7 @@ convert_EXISTS_to_ANY(PlannerInfo *root, Query *subselect,
 					  Node **testexpr, List **paramIds)
 {
 	Node	   *whereClause;
+	PlannerInfo subroot;
 	List	   *leftargs,
 			   *rightargs,
 			   *opids,
@@ -1711,12 +1718,15 @@ convert_EXISTS_to_ANY(PlannerInfo *root, Query *subselect,
 	 * parent aliases were flattened already, and we're not going to pull any
 	 * child Vars (of any description) into the parent.
 	 *
-	 * Note: passing the parent's root to eval_const_expressions is
-	 * technically wrong, but we can get away with it since only the
-	 * boundParams (if any) are used, and those would be the same in a
-	 * subroot.
+	 * Note: we construct up an entirely dummy PlannerInfo to pass to
+	 * eval_const_expressions.  This is fine because only the "glob" and
+	 * "parse" links are used by eval_const_expressions.
 	 */
-	whereClause = eval_const_expressions(root, whereClause);
+	MemSet(&subroot, 0, sizeof(subroot));
+	subroot.type = T_PlannerInfo;
+	subroot.glob = root->glob;
+	subroot.parse = subselect;
+	whereClause = eval_const_expressions(&subroot, whereClause);
 	whereClause = (Node *) canonicalize_qual((Expr *) whereClause, false);
 	whereClause = (Node *) make_ands_implicit((Expr *) whereClause);
 

@@ -5,6 +5,7 @@
  *
  * NOTE: the intended sequence for invoking these operations is
  *		replace_empty_jointree
+ *		collect_relation_attrs
  *		pull_up_sublinks
  *		preprocess_function_rtes
  *		expand_virtual_generated_columns
@@ -36,6 +37,7 @@
 #include "optimizer/clauses.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/placeholder.h"
+#include "optimizer/plancat.h"
 #include "optimizer/prep.h"
 #include "optimizer/subselect.h"
 #include "optimizer/tlist.h"
@@ -434,6 +436,39 @@ replace_empty_jointree(Query *parse)
 	rtr = makeNode(RangeTblRef);
 	rtr->rtindex = rti;
 	parse->jointree->fromlist = list_make1(rtr);
+}
+
+/*
+ * collect_relation_attrs
+ *		Scan the query's rangetable for ordinary relations and retrieve
+ *		attribute information from the system catalogs for each of them.
+ */
+void
+collect_relation_attrs(Query *parse)
+{
+	ListCell   *lc;
+
+	foreach(lc, parse->rtable)
+	{
+		RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);
+		Relation	relation;
+
+		/* We only collect attribute info for ordinary relations. */
+		if (rte->rtekind != RTE_RELATION)
+			continue;
+
+		/*
+		 * We need not lock the relation since it was already locked, either
+		 * by the rewriter or when expand_inherited_rtentry() added it to the
+		 * query's rangetable.
+		 */
+		relation = table_open(rte->relid, NoLock);
+
+		/* Record NOT NULL columns for this relation. */
+		get_relation_notnullatts(relation, rte);
+
+		table_close(relation, NoLock);
+	}
 }
 
 /*
@@ -1326,6 +1361,12 @@ pull_up_simple_subquery(PlannerInfo *root, Node *jtnode, RangeTblEntry *rte,
 	 * that we don't need so many special cases to deal with that situation.
 	 */
 	replace_empty_jointree(subquery);
+
+	/*
+	 * Scan the subquery's rangetable for ordinary relations and retrieve
+	 * attribute information from the system catalogs for each of them.
+	 */
+	collect_relation_attrs(subquery);
 
 	/*
 	 * Pull up any SubLinks within the subquery's quals, so that we don't

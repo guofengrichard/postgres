@@ -84,10 +84,10 @@ SELECT * FROM pred_tab t WHERE t.a IS NULL OR t.c IS NULL;
 -- are provably false
 EXPLAIN (COSTS OFF)
 SELECT * FROM pred_tab t WHERE t.b IS NULL OR t.c IS NULL;
-               QUERY PLAN               
-----------------------------------------
+       QUERY PLAN       
+------------------------
  Seq Scan on pred_tab t
-   Filter: ((b IS NULL) OR (c IS NULL))
+   Filter: (b IS NULL)
 (2 rows)
 
 --

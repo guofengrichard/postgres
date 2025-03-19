@@ -28,6 +28,8 @@ extern PGDLLIMPORT get_relation_info_hook_type get_relation_info_hook;
 extern void get_relation_info(PlannerInfo *root, Oid relationObjectId,
 							  bool inhparent, RelOptInfo *rel);
 
+extern void get_relation_notnullatts(Relation relation, RangeTblEntry *rte);
+
 extern List *infer_arbiter_indexes(PlannerInfo *root);
 
 extern void estimate_rel_size(Relation rel, int32 *attr_widths,
