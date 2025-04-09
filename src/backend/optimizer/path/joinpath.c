@@ -156,25 +156,24 @@ add_paths_to_joinrel(PlannerInfo *root,
 	 *
 	 * We have some special cases: for JOIN_SEMI and JOIN_ANTI, it doesn't
 	 * matter since the executor can make the equivalent optimization anyway;
-	 * we need not expend planner cycles on proofs.  For JOIN_UNIQUE_INNER, we
-	 * must be considering a semijoin whose inner side is not provably unique
-	 * (else reduce_unique_semijoins would've simplified it), so there's no
-	 * point in calling innerrel_is_unique.  However, if the LHS covers all of
-	 * the semijoin's min_lefthand, then it's appropriate to set inner_unique
-	 * because the path produced by create_unique_path will be unique relative
-	 * to the LHS.  (If we have an LHS that's only part of the min_lefthand,
-	 * that is *not* true.)  For JOIN_UNIQUE_OUTER, pass JOIN_INNER to avoid
-	 * letting that value escape this module.
+	 * we need not expend planner cycles on proofs.  That said, it might still
+	 * be helpful for enabling use of Memoize in ANTI joins - though not in
+	 * SEMI joins, as a semijoin with provably unique inner side should have
+	 * been reduced to an inner join.  This will be handled when building
+	 * Memoize paths.  For JOIN_UNIQUE_INNER, we must be considering a semijoin
+	 * whose inner side is not provably unique (else reduce_unique_semijoins
+	 * would've simplified it), so there's no point in calling
+	 * innerrel_is_unique.  However, if the LHS covers all of the semijoin's
+	 * min_lefthand, then it's appropriate to set inner_unique because the path
+	 * produced by create_unique_path will be unique relative to the LHS.  (If
+	 * we have an LHS that's only part of the min_lefthand, that is *not*
+	 * true.)  For JOIN_UNIQUE_OUTER, pass JOIN_INNER to avoid letting that
+	 * value escape this module.
 	 */
 	switch (jointype)
 	{
 		case JOIN_SEMI:
 		case JOIN_ANTI:
-
-			/*
-			 * XXX it may be worth proving this to allow a Memoize to be
-			 * considered for Nested Loop Semi/Anti Joins.
-			 */
 			extra.inner_unique = false; /* well, unproven */
 			break;
 		case JOIN_UNIQUE_INNER:
@@ -672,10 +671,10 @@ extract_lateral_vars_from_PHVs(PlannerInfo *root, Relids innerrelids)
  * we do not have a way to extract cache keys from joinrels.
  */
 static Path *
-get_memoize_path(PlannerInfo *root, RelOptInfo *innerrel,
-				 RelOptInfo *outerrel, Path *inner_path,
-				 Path *outer_path, JoinType jointype,
-				 JoinPathExtraData *extra)
+get_memoize_path(PlannerInfo *root, Relids joinrelids,
+				 RelOptInfo *innerrel, RelOptInfo *outerrel,
+				 Path *inner_path, Path *outer_path,
+				 JoinType jointype, JoinPathExtraData *extra)
 {
 	List	   *param_exprs;
 	List	   *hash_operators;
@@ -715,17 +714,36 @@ get_memoize_path(PlannerInfo *root, RelOptInfo *innerrel,
 		return NULL;
 
 	/*
-	 * Currently we don't do this for SEMI and ANTI joins unless they're
-	 * marked as inner_unique.  This is because nested loop SEMI/ANTI joins
-	 * don't scan the inner node to completion, which will mean memoize cannot
-	 * mark the cache entry as complete.
-	 *
-	 * XXX Currently we don't attempt to mark SEMI/ANTI joins as inner_unique
-	 * = true.  Should we?  See add_paths_to_joinrel()
+	 * Currently we don't do this for SEMI joins, because nested loop SEMI
+	 * joins don't scan the inner node to completion, which means memoize
+	 * cannot mark the cache entry as complete.  Nor can we mark the cache
+	 * entry as complete after fetching the first inner tuple, because if that
+	 * tuple and the current outer tuple don't satisfy the join clauses, a
+	 * second inner tuple that satisfies the parameters would find the cache
+	 * entry already marked as complete.  The only exception is when the inner
+	 * relation is provably unique — but in that case, reduce_unique_semijoins
+	 * would've simplified the SEMI join to an inner join.
 	 */
-	if (!extra->inner_unique && (jointype == JOIN_SEMI ||
-								 jointype == JOIN_ANTI))
+	if (jointype == JOIN_SEMI && !extra->inner_unique)
 		return NULL;
+
+	/*
+	 * We don't do this for ANTI joins for the same reason, unless the inner
+	 * relation can be provably unique, in which case we will mark the cache
+	 * entries as complete after fetching the first tuple.
+	 */
+	if (jointype == JOIN_ANTI && !extra->inner_unique)
+	{
+		extra->inner_unique = innerrel_is_unique(root,
+												 joinrelids,
+												 outerrel->relids,
+												 innerrel,
+												 jointype,
+												 extra->restrictlist,
+												 false);
+		if (!extra->inner_unique)
+			return NULL;
+	}
 
 	/*
 	 * Memoize normally marks cache entries as complete when it runs out of
@@ -1951,7 +1969,7 @@ match_unsorted_outer(PlannerInfo *root,
 				 * Try generating a memoize path and see if that makes the
 				 * nested loop any cheaper.
 				 */
-				mpath = get_memoize_path(root, innerrel, outerrel,
+				mpath = get_memoize_path(root, joinrel->relids, innerrel, outerrel,
 										 innerpath, outerpath, jointype,
 										 extra);
 				if (mpath != NULL)
@@ -2167,7 +2185,7 @@ consider_parallel_nestloop(PlannerInfo *root,
 			 * Try generating a memoize path and see if that makes the nested
 			 * loop any cheaper.
 			 */
-			mpath = get_memoize_path(root, innerrel, outerrel,
+			mpath = get_memoize_path(root, joinrel->relids, innerrel, outerrel,
 									 innerpath, outerpath, jointype,
 									 extra);
 			if (mpath != NULL)
