@@ -832,4 +832,13 @@ explain (verbose, costs off)
 select * from gtest32 t group by grouping sets (a, b, c, d) having c = 20;
 select * from gtest32 t group by grouping sets (a, b, c, d) having c = 20;
 
+-- Ensure that virtual generated column references within SubLinks that should
+-- be transformed into joins can get expanded
+explain (costs off)
+select 1 from gtest32 t1 where exists
+  (select 1 from gtest32 t2 where t1.a > t2.a and t2.b = 2);
+
+select 1 from gtest32 t1 where exists
+  (select 1 from gtest32 t2 where t1.a > t2.a and t2.b = 2);
+
 drop table gtest32;
