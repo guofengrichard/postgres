@@ -170,11 +170,11 @@ SELECT f1 AS "Correlated Field", f3 AS "Second Field"
     (SELECT f2 FROM SUBSELECT_TBL WHERE CAST(upper.f2 AS float) = f3);
  Correlated Field | Second Field 
 ------------------+--------------
-                2 |            4
-                3 |            5
                 1 |            1
                 2 |            2
+                2 |            4
                 3 |            3
+                3 |            5
 (5 rows)
 
 SELECT f1 AS "Correlated Field", f3 AS "Second Field"
@@ -195,10 +195,10 @@ SELECT f1 AS "Correlated Field"
                      WHERE f3 IS NOT NULL);
  Correlated Field 
 ------------------
-                2
-                3
                 1
                 2
+                2
+                3
                 3
 (5 rows)
 
@@ -2612,21 +2612,23 @@ explain (costs off)
 SELECT * FROM tenk1 A INNER JOIN tenk2 B
 ON A.hundred in (SELECT c.hundred FROM tenk2 C WHERE c.odd = b.odd)
 WHERE a.thousand < 750;
-                   QUERY PLAN                    
--------------------------------------------------
+                         QUERY PLAN                          
+-------------------------------------------------------------
  Hash Join
    Hash Cond: (c.odd = b.odd)
-   ->  Hash Join
-         Hash Cond: (a.hundred = c.hundred)
-         ->  Seq Scan on tenk1 a
-               Filter: (thousand < 750)
-         ->  Hash
-               ->  HashAggregate
-                     Group Key: c.odd, c.hundred
-                     ->  Seq Scan on tenk2 c
+   ->  Nested Loop
+         ->  HashAggregate
+               Group Key: c.odd, c.hundred
+               ->  Seq Scan on tenk2 c
+         ->  Memoize
+               Cache Key: c.hundred
+               Cache Mode: logical
+               ->  Index Scan using tenk1_hundred on tenk1 a
+                     Index Cond: (hundred = c.hundred)
+                     Filter: (thousand < 750)
    ->  Hash
          ->  Seq Scan on tenk2 b
-(12 rows)
+(14 rows)
 
 -- we can pull up the aggregate sublink into RHS of a left join.
 explain (costs off)
@@ -2672,18 +2674,17 @@ EXPLAIN (COSTS OFF)
 SELECT * FROM onek
   WHERE (unique1,ten) IN (VALUES (1,1), (20,0), (99,9), (17,99))
   ORDER BY unique1;
-                           QUERY PLAN                            
------------------------------------------------------------------
- Sort
-   Sort Key: onek.unique1
-   ->  Nested Loop
-         ->  HashAggregate
-               Group Key: "*VALUES*".column1, "*VALUES*".column2
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Nested Loop
+   ->  Unique
+         ->  Sort
+               Sort Key: "*VALUES*".column1, "*VALUES*".column2
                ->  Values Scan on "*VALUES*"
-         ->  Index Scan using onek_unique1 on onek
-               Index Cond: (unique1 = "*VALUES*".column1)
-               Filter: ("*VALUES*".column2 = ten)
-(9 rows)
+   ->  Index Scan using onek_unique1 on onek
+         Index Cond: (unique1 = "*VALUES*".column1)
+         Filter: ("*VALUES*".column2 = ten)
+(8 rows)
 
 EXPLAIN (COSTS OFF)
 SELECT * FROM onek
@@ -2858,12 +2859,10 @@ SELECT ten FROM onek WHERE unique1 IN (VALUES (1), (2) ORDER BY 1);
    ->  Unique
          ->  Sort
                Sort Key: "*VALUES*".column1
-               ->  Sort
-                     Sort Key: "*VALUES*".column1
-                     ->  Values Scan on "*VALUES*"
+               ->  Values Scan on "*VALUES*"
    ->  Index Scan using onek_unique1 on onek
          Index Cond: (unique1 = "*VALUES*".column1)
-(9 rows)
+(7 rows)
 
 EXPLAIN (COSTS OFF)
 SELECT ten FROM onek WHERE unique1 IN (VALUES (1), (2) LIMIT 1);

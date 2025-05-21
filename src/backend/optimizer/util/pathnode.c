@@ -381,7 +381,6 @@ set_cheapest(RelOptInfo *parent_rel)
 
 	parent_rel->cheapest_startup_path = cheapest_startup_path;
 	parent_rel->cheapest_total_path = cheapest_total_path;
-	parent_rel->cheapest_unique_path = NULL;	/* computed only if needed */
 	parent_rel->cheapest_parameterized_paths = parameterized_paths;
 }
 
@@ -1741,8 +1740,8 @@ create_unique_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
 	Assert(bms_equal(rel->relids, sjinfo->syn_righthand));
 
 	/* If result already cached, return it */
-	if (rel->cheapest_unique_path)
-		return (UniquePath *) rel->cheapest_unique_path;
+//	if (rel->cheapest_unique_path)
+//		return (UniquePath *) rel->cheapest_unique_path;
 
 	/* If it's not possible to unique-ify, return NULL */
 	if (!(sjinfo->semi_can_btree || sjinfo->semi_can_hash))
@@ -1805,7 +1804,7 @@ create_unique_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
 		pathnode->path.total_cost = subpath->total_cost;
 		pathnode->path.pathkeys = subpath->pathkeys;
 
-		rel->cheapest_unique_path = (Path *) pathnode;
+//		rel->cheapest_unique_path = (Path *) pathnode;
 
 		MemoryContextSwitchTo(oldcontext);
 
@@ -1844,7 +1843,7 @@ create_unique_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
 				pathnode->path.total_cost = subpath->total_cost;
 				pathnode->path.pathkeys = subpath->pathkeys;
 
-				rel->cheapest_unique_path = (Path *) pathnode;
+//				rel->cheapest_unique_path = (Path *) pathnode;
 
 				MemoryContextSwitchTo(oldcontext);
 
@@ -1945,7 +1944,7 @@ create_unique_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
 		pathnode->path.total_cost = sort_path.total_cost;
 	}
 
-	rel->cheapest_unique_path = (Path *) pathnode;
+//	rel->cheapest_unique_path = (Path *) pathnode;
 
 	MemoryContextSwitchTo(oldcontext);
 
@@ -2790,8 +2789,7 @@ create_projection_path(PlannerInfo *root,
 	pathnode->path.pathtype = T_Result;
 	pathnode->path.parent = rel;
 	pathnode->path.pathtarget = target;
-	/* For now, assume we are above any joins, so no parameterization */
-	pathnode->path.param_info = NULL;
+	pathnode->path.param_info = subpath->param_info;
 	pathnode->path.parallel_aware = false;
 	pathnode->path.parallel_safe = rel->consider_parallel &&
 		subpath->parallel_safe &&
@@ -3046,8 +3044,7 @@ create_incremental_sort_path(PlannerInfo *root,
 	pathnode->path.parent = rel;
 	/* Sort doesn't project, so use source path's pathtarget */
 	pathnode->path.pathtarget = subpath->pathtarget;
-	/* For now, assume we are above any joins, so no parameterization */
-	pathnode->path.param_info = NULL;
+	pathnode->path.param_info = subpath->param_info;
 	pathnode->path.parallel_aware = false;
 	pathnode->path.parallel_safe = rel->consider_parallel &&
 		subpath->parallel_safe;
@@ -3094,8 +3091,7 @@ create_sort_path(PlannerInfo *root,
 	pathnode->path.parent = rel;
 	/* Sort doesn't project, so use source path's pathtarget */
 	pathnode->path.pathtarget = subpath->pathtarget;
-	/* For now, assume we are above any joins, so no parameterization */
-	pathnode->path.param_info = NULL;
+	pathnode->path.param_info = subpath->param_info;
 	pathnode->path.parallel_aware = false;
 	pathnode->path.parallel_safe = rel->consider_parallel &&
 		subpath->parallel_safe;
@@ -3200,7 +3196,7 @@ create_upper_unique_path(PlannerInfo *root,
 	/* Unique doesn't project, so use source path's pathtarget */
 	pathnode->path.pathtarget = subpath->pathtarget;
 	/* For now, assume we are above any joins, so no parameterization */
-	pathnode->path.param_info = NULL;
+	pathnode->path.param_info = subpath->param_info;
 	pathnode->path.parallel_aware = false;
 	pathnode->path.parallel_safe = rel->consider_parallel &&
 		subpath->parallel_safe;
@@ -3256,8 +3252,7 @@ create_agg_path(PlannerInfo *root,
 	pathnode->path.pathtype = T_Agg;
 	pathnode->path.parent = rel;
 	pathnode->path.pathtarget = target;
-	/* For now, assume we are above any joins, so no parameterization */
-	pathnode->path.param_info = NULL;
+	pathnode->path.param_info = subpath->param_info;
 	pathnode->path.parallel_aware = false;
 	pathnode->path.parallel_safe = rel->consider_parallel &&
 		subpath->parallel_safe;

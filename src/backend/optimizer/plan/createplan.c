@@ -295,7 +295,8 @@ static Group *make_group(List *tlist, List *qual, int numGroupCols,
 						 Plan *lefttree);
 static Unique *make_unique_from_sortclauses(Plan *lefttree, List *distinctList);
 static Unique *make_unique_from_pathkeys(Plan *lefttree,
-										 List *pathkeys, int numCols);
+										 List *pathkeys, int numCols,
+										 Relids relids);
 static Gather *make_gather(List *qptlist, List *qpqual,
 						   int nworkers, int rescan_param, bool single_copy, Plan *subplan);
 static SetOp *make_setop(SetOpCmd cmd, SetOpStrategy strategy,
@@ -2288,7 +2289,8 @@ create_upper_unique_plan(PlannerInfo *root, UpperUniquePath *best_path, int flag
 
 	plan = make_unique_from_pathkeys(subplan,
 									 best_path->path.pathkeys,
-									 best_path->numkeys);
+									 best_path->numkeys,
+									 best_path->path.parent->relids);
 
 	copy_generic_path_info(&plan->plan, (Path *) best_path);
 
@@ -6815,7 +6817,8 @@ make_unique_from_sortclauses(Plan *lefttree, List *distinctList)
  * as above, but use pathkeys to identify the sort columns and semantics
  */
 static Unique *
-make_unique_from_pathkeys(Plan *lefttree, List *pathkeys, int numCols)
+make_unique_from_pathkeys(Plan *lefttree, List *pathkeys, int numCols,
+						  Relids relids)
 {
 	Unique	   *node = makeNode(Unique);
 	Plan	   *plan = &node->plan;
@@ -6878,7 +6881,7 @@ make_unique_from_pathkeys(Plan *lefttree, List *pathkeys, int numCols)
 			foreach(j, plan->targetlist)
 			{
 				tle = (TargetEntry *) lfirst(j);
-				em = find_ec_member_matching_expr(ec, tle->expr, NULL);
+				em = find_ec_member_matching_expr(ec, tle->expr, relids);
 				if (em)
 				{
 					/* found expr already in tlist */

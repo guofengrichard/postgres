@@ -19,6 +19,7 @@
 #include "optimizer/joininfo.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
+#include "optimizer/planner.h"
 #include "partitioning/partbounds.h"
 #include "utils/memutils.h"
 
@@ -444,8 +445,7 @@ join_is_legal(PlannerInfo *root, RelOptInfo *rel1, RelOptInfo *rel2,
 		}
 		else if (sjinfo->jointype == JOIN_SEMI &&
 				 bms_equal(sjinfo->syn_righthand, rel2->relids) &&
-				 create_unique_path(root, rel2, rel2->cheapest_total_path,
-									sjinfo) != NULL)
+				 create_unique_paths(root, rel2, sjinfo) != NULL)
 		{
 			/*----------
 			 * For a semijoin, we can join the RHS to anything else by
@@ -477,8 +477,7 @@ join_is_legal(PlannerInfo *root, RelOptInfo *rel1, RelOptInfo *rel2,
 		}
 		else if (sjinfo->jointype == JOIN_SEMI &&
 				 bms_equal(sjinfo->syn_righthand, rel1->relids) &&
-				 create_unique_path(root, rel1, rel1->cheapest_total_path,
-									sjinfo) != NULL)
+				 create_unique_paths(root, rel1, sjinfo) != NULL)
 		{
 			/* Reversed semijoin case */
 			if (match_sjinfo)
@@ -974,6 +973,8 @@ populate_joinrel_with_paths(PlannerInfo *root, RelOptInfo *rel1,
 			break;
 		case JOIN_SEMI:
 
+			RelOptInfo *rel2_unique;
+
 			/*
 			 * We might have a normal semijoin, or a case where we don't have
 			 * enough rels to do the semijoin but can unique-ify the RHS and
@@ -1000,14 +1001,15 @@ populate_joinrel_with_paths(PlannerInfo *root, RelOptInfo *rel1,
 			/*
 			 * If we know how to unique-ify the RHS and one input rel is
 			 * exactly the RHS (not a superset) we can consider unique-ifying
-			 * it and then doing a regular join.  (The create_unique_path
+			 * it and then doing a regular join.  (The create_unique_paths
 			 * check here is probably redundant with what join_is_legal did,
 			 * but if so the check is cheap because it's cached.  So test
 			 * anyway to be sure.)
 			 */
 			if (bms_equal(sjinfo->syn_righthand, rel2->relids) &&
-				create_unique_path(root, rel2, rel2->cheapest_total_path,
-								   sjinfo) != NULL)
+				(rel2_unique = create_unique_paths(root, rel2, sjinfo)) != NULL)
+//				create_unique_path(root, rel2, rel2->cheapest_total_path,
+//								   sjinfo) != NULL)
 			{
 				if (is_dummy_rel(rel1) || is_dummy_rel(rel2) ||
 					restriction_is_constant_false(restrictlist, joinrel, false))
@@ -1015,12 +1017,20 @@ populate_joinrel_with_paths(PlannerInfo *root, RelOptInfo *rel1,
 					mark_dummy_rel(joinrel);
 					break;
 				}
+				add_paths_to_joinrel(root, joinrel, rel1, rel2_unique,
+									 JOIN_INNER, sjinfo,
+									 restrictlist);
+				add_paths_to_joinrel(root, joinrel, rel2_unique, rel1,
+									 JOIN_INNER, sjinfo,
+									 restrictlist);
+#if 0
 				add_paths_to_joinrel(root, joinrel, rel1, rel2,
 									 JOIN_UNIQUE_INNER, sjinfo,
 									 restrictlist);
 				add_paths_to_joinrel(root, joinrel, rel2, rel1,
 									 JOIN_UNIQUE_OUTER, sjinfo,
 									 restrictlist);
+#endif
 			}
 			break;
 		case JOIN_ANTI:

@@ -924,7 +924,6 @@ typedef struct RelOptInfo
 	List	   *partial_pathlist;	/* partial Paths */
 	struct Path *cheapest_startup_path;
 	struct Path *cheapest_total_path;
-	struct Path *cheapest_unique_path;
 	List	   *cheapest_parameterized_paths;
 
 	/*
@@ -1001,6 +1000,12 @@ typedef struct RelOptInfo
 	List	   *unique_for_rels;
 	/* known not unique for these set(s) */
 	List	   *non_unique_for_rels;
+
+	/*
+	 * information about unique-ification of this relation
+	 */
+	struct RelOptInfo *unique_rel;
+	List			  *unique_pathkeys;
 
 	/*
 	 * used by various scans and joins:
