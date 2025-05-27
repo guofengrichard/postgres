@@ -95,8 +95,6 @@ static Material *create_material_plan(PlannerInfo *root, MaterialPath *best_path
 									  int flags);
 static Memoize *create_memoize_plan(PlannerInfo *root, MemoizePath *best_path,
 									int flags);
-static Plan *create_unique_plan(PlannerInfo *root, UniquePath *best_path,
-								int flags);
 static Gather *create_gather_plan(PlannerInfo *root, GatherPath *best_path);
 static Plan *create_projection_plan(PlannerInfo *root,
 									ProjectionPath *best_path,
@@ -293,7 +291,6 @@ static WindowAgg *make_windowagg(List *tlist, WindowClause *wc,
 static Group *make_group(List *tlist, List *qual, int numGroupCols,
 						 AttrNumber *grpColIdx, Oid *grpOperators, Oid *grpCollations,
 						 Plan *lefttree);
-static Unique *make_unique_from_sortclauses(Plan *lefttree, List *distinctList);
 static Unique *make_unique_from_pathkeys(Plan *lefttree,
 										 List *pathkeys, int numCols,
 										 Relids relids);
@@ -468,19 +465,9 @@ create_plan_recurse(PlannerInfo *root, Path *best_path, int flags)
 												flags);
 			break;
 		case T_Unique:
-			if (IsA(best_path, UpperUniquePath))
-			{
-				plan = (Plan *) create_upper_unique_plan(root,
-														 (UpperUniquePath *) best_path,
-														 flags);
-			}
-			else
-			{
-				Assert(IsA(best_path, UniquePath));
-				plan = create_unique_plan(root,
-										  (UniquePath *) best_path,
-										  flags);
-			}
+			plan = (Plan *) create_upper_unique_plan(root,
+													 (UpperUniquePath *) best_path,
+													 flags);
 			break;
 		case T_Gather:
 			plan = (Plan *) create_gather_plan(root,
@@ -1707,207 +1694,6 @@ create_memoize_plan(PlannerInfo *root, MemoizePath *best_path, int flags)
 						best_path->est_entries, keyparamids);
 
 	copy_generic_path_info(&plan->plan, (Path *) best_path);
-
-	return plan;
-}
-
-/*
- * create_unique_plan
- *	  Create a Unique plan for 'best_path' and (recursively) plans
- *	  for its subpaths.
- *
- *	  Returns a Plan node.
- */
-static Plan *
-create_unique_plan(PlannerInfo *root, UniquePath *best_path, int flags)
-{
-	Plan	   *plan;
-	Plan	   *subplan;
-	List	   *in_operators;
-	List	   *uniq_exprs;
-	List	   *newtlist;
-	int			nextresno;
-	bool		newitems;
-	int			numGroupCols;
-	AttrNumber *groupColIdx;
-	Oid		   *groupCollations;
-	int			groupColPos;
-	ListCell   *l;
-
-	/* Unique doesn't project, so tlist requirements pass through */
-	subplan = create_plan_recurse(root, best_path->subpath, flags);
-
-	/* Done if we don't need to do any actual unique-ifying */
-	if (best_path->umethod == UNIQUE_PATH_NOOP)
-		return subplan;
-
-	/*
-	 * As constructed, the subplan has a "flat" tlist containing just the Vars
-	 * needed here and at upper levels.  The values we are supposed to
-	 * unique-ify may be expressions in these variables.  We have to add any
-	 * such expressions to the subplan's tlist.
-	 *
-	 * The subplan may have a "physical" tlist if it is a simple scan plan. If
-	 * we're going to sort, this should be reduced to the regular tlist, so
-	 * that we don't sort more data than we need to.  For hashing, the tlist
-	 * should be left as-is if we don't need to add any expressions; but if we
-	 * do have to add expressions, then a projection step will be needed at
-	 * runtime anyway, so we may as well remove unneeded items. Therefore
-	 * newtlist starts from build_path_tlist() not just a copy of the
-	 * subplan's tlist; and we don't install it into the subplan unless we are
-	 * sorting or stuff has to be added.
-	 */
-	in_operators = best_path->in_operators;
-	uniq_exprs = best_path->uniq_exprs;
-
-	/* initialize modified subplan tlist as just the "required" vars */
-	newtlist = build_path_tlist(root, &best_path->path);
-	nextresno = list_length(newtlist) + 1;
-	newitems = false;
-
-	foreach(l, uniq_exprs)
-	{
-		Expr	   *uniqexpr = lfirst(l);
-		TargetEntry *tle;
-
-		tle = tlist_member(uniqexpr, newtlist);
-		if (!tle)
-		{
-			tle = makeTargetEntry((Expr *) uniqexpr,
-								  nextresno,
-								  NULL,
-								  false);
-			newtlist = lappend(newtlist, tle);
-			nextresno++;
-			newitems = true;
-		}
-	}
-
-	/* Use change_plan_targetlist in case we need to insert a Result node */
-	if (newitems || best_path->umethod == UNIQUE_PATH_SORT)
-		subplan = change_plan_targetlist(subplan, newtlist,
-										 best_path->path.parallel_safe);
-
-	/*
-	 * Build control information showing which subplan output columns are to
-	 * be examined by the grouping step.  Unfortunately we can't merge this
-	 * with the previous loop, since we didn't then know which version of the
-	 * subplan tlist we'd end up using.
-	 */
-	newtlist = subplan->targetlist;
-	numGroupCols = list_length(uniq_exprs);
-	groupColIdx = (AttrNumber *) palloc(numGroupCols * sizeof(AttrNumber));
-	groupCollations = (Oid *) palloc(numGroupCols * sizeof(Oid));
-
-	groupColPos = 0;
-	foreach(l, uniq_exprs)
-	{
-		Expr	   *uniqexpr = lfirst(l);
-		TargetEntry *tle;
-
-		tle = tlist_member(uniqexpr, newtlist);
-		if (!tle)				/* shouldn't happen */
-			elog(ERROR, "failed to find unique expression in subplan tlist");
-		groupColIdx[groupColPos] = tle->resno;
-		groupCollations[groupColPos] = exprCollation((Node *) tle->expr);
-		groupColPos++;
-	}
-
-	if (best_path->umethod == UNIQUE_PATH_HASH)
-	{
-		Oid		   *groupOperators;
-
-		/*
-		 * Get the hashable equality operators for the Agg node to use.
-		 * Normally these are the same as the IN clause operators, but if
-		 * those are cross-type operators then the equality operators are the
-		 * ones for the IN clause operators' RHS datatype.
-		 */
-		groupOperators = (Oid *) palloc(numGroupCols * sizeof(Oid));
-		groupColPos = 0;
-		foreach(l, in_operators)
-		{
-			Oid			in_oper = lfirst_oid(l);
-			Oid			eq_oper;
-
-			if (!get_compatible_hash_operators(in_oper, NULL, &eq_oper))
-				elog(ERROR, "could not find compatible hash operator for operator %u",
-					 in_oper);
-			groupOperators[groupColPos++] = eq_oper;
-		}
-
-		/*
-		 * Since the Agg node is going to project anyway, we can give it the
-		 * minimum output tlist, without any stuff we might have added to the
-		 * subplan tlist.
-		 */
-		plan = (Plan *) make_agg(build_path_tlist(root, &best_path->path),
-								 NIL,
-								 AGG_HASHED,
-								 AGGSPLIT_SIMPLE,
-								 numGroupCols,
-								 groupColIdx,
-								 groupOperators,
-								 groupCollations,
-								 NIL,
-								 NIL,
-								 best_path->path.rows,
-								 0,
-								 subplan);
-	}
-	else
-	{
-		List	   *sortList = NIL;
-		Sort	   *sort;
-
-		/* Create an ORDER BY list to sort the input compatibly */
-		groupColPos = 0;
-		foreach(l, in_operators)
-		{
-			Oid			in_oper = lfirst_oid(l);
-			Oid			sortop;
-			Oid			eqop;
-			TargetEntry *tle;
-			SortGroupClause *sortcl;
-
-			sortop = get_ordering_op_for_equality_op(in_oper, false);
-			if (!OidIsValid(sortop))	/* shouldn't happen */
-				elog(ERROR, "could not find ordering operator for equality operator %u",
-					 in_oper);
-
-			/*
-			 * The Unique node will need equality operators.  Normally these
-			 * are the same as the IN clause operators, but if those are
-			 * cross-type operators then the equality operators are the ones
-			 * for the IN clause operators' RHS datatype.
-			 */
-			eqop = get_equality_op_for_ordering_op(sortop, NULL);
-			if (!OidIsValid(eqop))	/* shouldn't happen */
-				elog(ERROR, "could not find equality operator for ordering operator %u",
-					 sortop);
-
-			tle = get_tle_by_resno(subplan->targetlist,
-								   groupColIdx[groupColPos]);
-			Assert(tle != NULL);
-
-			sortcl = makeNode(SortGroupClause);
-			sortcl->tleSortGroupRef = assignSortGroupRef(tle,
-														 subplan->targetlist);
-			sortcl->eqop = eqop;
-			sortcl->sortop = sortop;
-			sortcl->reverse_sort = false;
-			sortcl->nulls_first = false;
-			sortcl->hashable = false;	/* no need to make this accurate */
-			sortList = lappend(sortList, sortcl);
-			groupColPos++;
-		}
-		sort = make_sort_from_sortclauses(sortList, subplan);
-		label_sort_with_costsize(root, sort, -1.0);
-		plan = (Plan *) make_unique_from_sortclauses((Plan *) sort, sortList);
-	}
-
-	/* Copy cost data from Path to Plan */
-	copy_generic_path_info(plan, &best_path->path);
 
 	return plan;
 }
@@ -6758,57 +6544,6 @@ make_group(List *tlist,
 	plan->targetlist = tlist;
 	plan->lefttree = lefttree;
 	plan->righttree = NULL;
-
-	return node;
-}
-
-/*
- * distinctList is a list of SortGroupClauses, identifying the targetlist items
- * that should be considered by the Unique filter.  The input path must
- * already be sorted accordingly.
- */
-static Unique *
-make_unique_from_sortclauses(Plan *lefttree, List *distinctList)
-{
-	Unique	   *node = makeNode(Unique);
-	Plan	   *plan = &node->plan;
-	int			numCols = list_length(distinctList);
-	int			keyno = 0;
-	AttrNumber *uniqColIdx;
-	Oid		   *uniqOperators;
-	Oid		   *uniqCollations;
-	ListCell   *slitem;
-
-	plan->targetlist = lefttree->targetlist;
-	plan->qual = NIL;
-	plan->lefttree = lefttree;
-	plan->righttree = NULL;
-
-	/*
-	 * convert SortGroupClause list into arrays of attr indexes and equality
-	 * operators, as wanted by executor
-	 */
-	Assert(numCols > 0);
-	uniqColIdx = (AttrNumber *) palloc(sizeof(AttrNumber) * numCols);
-	uniqOperators = (Oid *) palloc(sizeof(Oid) * numCols);
-	uniqCollations = (Oid *) palloc(sizeof(Oid) * numCols);
-
-	foreach(slitem, distinctList)
-	{
-		SortGroupClause *sortcl = (SortGroupClause *) lfirst(slitem);
-		TargetEntry *tle = get_sortgroupclause_tle(sortcl, plan->targetlist);
-
-		uniqColIdx[keyno] = tle->resno;
-		uniqOperators[keyno] = sortcl->eqop;
-		uniqCollations[keyno] = exprCollation((Node *) tle->expr);
-		Assert(OidIsValid(uniqOperators[keyno]));
-		keyno++;
-	}
-
-	node->numCols = numCols;
-	node->uniqColIdx = uniqColIdx;
-	node->uniqOperators = uniqOperators;
-	node->uniqCollations = uniqCollations;
 
 	return node;
 }

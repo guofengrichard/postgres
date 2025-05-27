@@ -91,8 +91,6 @@ extern MemoizePath *create_memoize_path(PlannerInfo *root,
 										bool singlerow,
 										bool binary_mode,
 										double calls);
-extern UniquePath *create_unique_path(PlannerInfo *root, RelOptInfo *rel,
-									  Path *subpath, SpecialJoinInfo *sjinfo);
 extern GatherPath *create_gather_path(PlannerInfo *root,
 									  RelOptInfo *rel, Path *subpath, PathTarget *target,
 									  Relids required_outer, double *rows);

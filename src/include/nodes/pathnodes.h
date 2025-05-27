@@ -1744,8 +1744,8 @@ typedef struct ParamPathInfo
  * and the specified outer rel(s).
  *
  * "rows" is the same as parent->rows in simple paths, but in parameterized
- * paths and UniquePaths it can be less than parent->rows, reflecting the
- * fact that we've filtered by extra join conditions or removed duplicates.
+ * paths it can be less than parent->rows, reflecting the fact that we've
+ * filtered by extra join conditions.
  *
  * "pathkeys" is a List of PathKey nodes (see above), describing the sort
  * ordering of the path's output rows.
@@ -2141,34 +2141,6 @@ typedef struct MemoizePath
 								 * planner expects will fit in the cache, or 0
 								 * if unknown */
 } MemoizePath;
-
-/*
- * UniquePath represents elimination of distinct rows from the output of
- * its subpath.
- *
- * This can represent significantly different plans: either hash-based or
- * sort-based implementation, or a no-op if the input path can be proven
- * distinct already.  The decision is sufficiently localized that it's not
- * worth having separate Path node types.  (Note: in the no-op case, we could
- * eliminate the UniquePath node entirely and just return the subpath; but
- * it's convenient to have a UniquePath in the path tree to signal upper-level
- * routines that the input is known distinct.)
- */
-typedef enum UniquePathMethod
-{
-	UNIQUE_PATH_NOOP,			/* input is known unique already */
-	UNIQUE_PATH_HASH,			/* use hashing */
-	UNIQUE_PATH_SORT,			/* use sorting */
-} UniquePathMethod;
-
-typedef struct UniquePath
-{
-	Path		path;
-	Path	   *subpath;
-	UniquePathMethod umethod;
-	List	   *in_operators;	/* equality operators of the IN clause */
-	List	   *uniq_exprs;		/* expressions to be made unique */
-} UniquePath;
 
 /*
  * GatherPath runs several copies of a plan in parallel and collects the
