@@ -104,8 +104,7 @@ static Sort *create_sort_plan(PlannerInfo *root, SortPath *best_path, int flags)
 static IncrementalSort *create_incrementalsort_plan(PlannerInfo *root,
 													IncrementalSortPath *best_path, int flags);
 static Group *create_group_plan(PlannerInfo *root, GroupPath *best_path);
-static Unique *create_upper_unique_plan(PlannerInfo *root, UpperUniquePath *best_path,
-										int flags);
+static Unique *create_unique_plan(PlannerInfo *root, UniquePath *best_path, int flags);
 static Agg *create_agg_plan(PlannerInfo *root, AggPath *best_path);
 static Plan *create_groupingsets_plan(PlannerInfo *root, GroupingSetsPath *best_path);
 static Result *create_minmaxagg_plan(PlannerInfo *root, MinMaxAggPath *best_path);
@@ -465,9 +464,9 @@ create_plan_recurse(PlannerInfo *root, Path *best_path, int flags)
 												flags);
 			break;
 		case T_Unique:
-			plan = (Plan *) create_upper_unique_plan(root,
-													 (UpperUniquePath *) best_path,
-													 flags);
+			plan = (Plan *) create_unique_plan(root,
+											   (UniquePath *) best_path,
+											   flags);
 			break;
 		case T_Gather:
 			plan = (Plan *) create_gather_plan(root,
@@ -2055,13 +2054,13 @@ create_group_plan(PlannerInfo *root, GroupPath *best_path)
 }
 
 /*
- * create_upper_unique_plan
+ * create_unique_plan
  *
  *	  Create a Unique plan for 'best_path' and (recursively) plans
  *	  for its subpaths.
  */
 static Unique *
-create_upper_unique_plan(PlannerInfo *root, UpperUniquePath *best_path, int flags)
+create_unique_plan(PlannerInfo *root, UniquePath *best_path, int flags)
 {
 	Unique	   *plan;
 	Plan	   *subplan;

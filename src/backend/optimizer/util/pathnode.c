@@ -2896,12 +2896,9 @@ create_group_path(PlannerInfo *root,
 }
 
 /*
- * create_upper_unique_path
+ * create_unique_path
  *	  Creates a pathnode that represents performing an explicit Unique step
  *	  on presorted input.
- *
- * This produces a Unique plan node, but the use-case is so different from
- * create_unique_path that it doesn't seem worth trying to merge the two.
  *
  * 'rel' is the parent relation associated with the result
  * 'subpath' is the path representing the source of data
@@ -2911,14 +2908,14 @@ create_group_path(PlannerInfo *root,
  * The input path must be sorted on the grouping columns, plus possibly
  * additional columns; so the first numCols pathkeys are the grouping columns
  */
-UpperUniquePath *
-create_upper_unique_path(PlannerInfo *root,
-						 RelOptInfo *rel,
-						 Path *subpath,
-						 int numCols,
-						 double numGroups)
+UniquePath *
+create_unique_path(PlannerInfo *root,
+				   RelOptInfo *rel,
+				   Path *subpath,
+				   int numCols,
+				   double numGroups)
 {
-	UpperUniquePath *pathnode = makeNode(UpperUniquePath);
+	UniquePath *pathnode = makeNode(UniquePath);
 
 	pathnode->path.pathtype = T_Unique;
 	pathnode->path.parent = rel;

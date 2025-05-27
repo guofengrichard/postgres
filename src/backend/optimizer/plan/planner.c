@@ -4923,10 +4923,10 @@ create_partial_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 				else
 				{
 					add_partial_path(partial_distinct_rel, (Path *)
-									 create_upper_unique_path(root, partial_distinct_rel,
-															  sorted_path,
-															  list_length(root->distinct_pathkeys),
-															  numDistinctRows));
+									 create_unique_path(root, partial_distinct_rel,
+														sorted_path,
+														list_length(root->distinct_pathkeys),
+														numDistinctRows));
 				}
 			}
 		}
@@ -5117,10 +5117,10 @@ create_final_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 				else
 				{
 					add_path(distinct_rel, (Path *)
-							 create_upper_unique_path(root, distinct_rel,
-													  sorted_path,
-													  list_length(root->distinct_pathkeys),
-													  numDistinctRows));
+							 create_unique_path(root, distinct_rel,
+												sorted_path,
+												list_length(root->distinct_pathkeys),
+												numDistinctRows));
 				}
 			}
 		}
@@ -8509,9 +8509,9 @@ create_final_unique_paths(PlannerInfo *root, RelOptInfo *input_rel,
 																 -1.0);
 			}
 
-			path = (Path *) create_upper_unique_path(root, unique_rel, path,
-											list_length(sortPathkeys),
-											unique_rel->rows);
+			path = (Path *) create_unique_path(root, unique_rel, path,
+											   list_length(sortPathkeys),
+											   unique_rel->rows);
 
 			add_path(unique_rel, path);
 		}
@@ -8647,10 +8647,9 @@ create_partial_unique_paths(PlannerInfo *root, RelOptInfo *input_rel,
 																 -1.0);
 			}
 
-			path = (Path *) create_upper_unique_path(root, partial_unique_rel,
-											  path,
-											  list_length(sortPathkeys),
-											  partial_unique_rel->rows);
+			path = (Path *) create_unique_path(root, partial_unique_rel, path,
+											   list_length(sortPathkeys),
+											   partial_unique_rel->rows);
 
 			add_partial_path(partial_unique_rel, path);
 		}

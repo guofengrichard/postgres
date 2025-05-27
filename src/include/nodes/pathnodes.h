@@ -2348,17 +2348,17 @@ typedef struct GroupPath
 } GroupPath;
 
 /*
- * UpperUniquePath represents adjacent-duplicate removal (in presorted input)
+ * UniquePath represents adjacent-duplicate removal (in presorted input)
  *
  * The columns to be compared are the first numkeys columns of the path's
  * pathkeys.  The input is presumed already sorted that way.
  */
-typedef struct UpperUniquePath
+typedef struct UniquePath
 {
 	Path		path;
 	Path	   *subpath;		/* path representing input source */
 	int			numkeys;		/* number of pathkey columns to compare */
-} UpperUniquePath;
+} UniquePath;
 
 /*
  * AggPath represents generic computation of aggregate functions
