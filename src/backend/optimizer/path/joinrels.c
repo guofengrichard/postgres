@@ -1008,8 +1008,6 @@ populate_joinrel_with_paths(PlannerInfo *root, RelOptInfo *rel1,
 			 */
 			if (bms_equal(sjinfo->syn_righthand, rel2->relids) &&
 				(rel2_unique = create_unique_paths(root, rel2, sjinfo)) != NULL)
-//				create_unique_path(root, rel2, rel2->cheapest_total_path,
-//								   sjinfo) != NULL)
 			{
 				if (is_dummy_rel(rel1) || is_dummy_rel(rel2) ||
 					restriction_is_constant_false(restrictlist, joinrel, false))
@@ -1018,19 +1016,11 @@ populate_joinrel_with_paths(PlannerInfo *root, RelOptInfo *rel1,
 					break;
 				}
 				add_paths_to_joinrel(root, joinrel, rel1, rel2_unique,
-									 JOIN_INNER, sjinfo,
-									 restrictlist);
-				add_paths_to_joinrel(root, joinrel, rel2_unique, rel1,
-									 JOIN_INNER, sjinfo,
-									 restrictlist);
-#if 0
-				add_paths_to_joinrel(root, joinrel, rel1, rel2,
 									 JOIN_UNIQUE_INNER, sjinfo,
 									 restrictlist);
-				add_paths_to_joinrel(root, joinrel, rel2, rel1,
+				add_paths_to_joinrel(root, joinrel, rel2_unique, rel1,
 									 JOIN_UNIQUE_OUTER, sjinfo,
 									 restrictlist);
-#endif
 			}
 			break;
 		case JOIN_ANTI:

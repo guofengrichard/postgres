@@ -113,12 +113,12 @@ static void generate_mergejoin_paths(PlannerInfo *root,
  * direction from what's indicated in sjinfo.
  *
  * Also, this routine and others in this module accept the special JoinTypes
- * JOIN_UNIQUE_OUTER and JOIN_UNIQUE_INNER to indicate that we should
- * unique-ify the outer or inner relation and then apply a regular inner
- * join.  These values are not allowed to propagate outside this module,
- * however.  Path cost estimation code may need to recognize that it's
- * dealing with such a case --- the combination of nominal jointype INNER
- * with sjinfo->jointype == JOIN_SEMI indicates that.
+ * JOIN_UNIQUE_OUTER and JOIN_UNIQUE_INNER to indicate that the outer or inner
+ * relation has been unique-ified and a regular inner join should then be
+ * applied.  These values are not allowed to propagate outside this module,
+ * however.  Path cost estimation code may need to recognize that it's dealing
+ * with such a case --- the combination of nominal jointype INNER with
+ * sjinfo->jointype == JOIN_SEMI indicates that.
  */
 void
 add_paths_to_joinrel(PlannerInfo *root,
@@ -161,7 +161,7 @@ add_paths_to_joinrel(PlannerInfo *root,
 	 * (else reduce_unique_semijoins would've simplified it), so there's no
 	 * point in calling innerrel_is_unique.  However, if the LHS covers all of
 	 * the semijoin's min_lefthand, then it's appropriate to set inner_unique
-	 * because the path produced by create_unique_path will be unique relative
+	 * because the unique relation produced by create_unique_paths will be unique relative
 	 * to the LHS.  (If we have an LHS that's only part of the min_lefthand,
 	 * that is *not* true.)  For JOIN_UNIQUE_OUTER, pass JOIN_INNER to avoid
 	 * letting that value escape this module.
@@ -1377,6 +1377,13 @@ sort_inner_and_outer(PlannerInfo *root,
 		return;
 
 	/*
+	 * If the outer or inner relation has been unique-ified, handle as a plain
+	 * inner join.
+	 */
+	if (jointype == JOIN_UNIQUE_OUTER || jointype == JOIN_UNIQUE_INNER)
+		jointype = JOIN_INNER;
+
+	/*
 	 * We only consider the cheapest-total-cost input paths, since we are
 	 * assuming here that a sort is required.  We will consider
 	 * cheapest-startup-cost input paths later, and only if they don't need a
@@ -1403,25 +1410,6 @@ sort_inner_and_outer(PlannerInfo *root,
 		return;
 
 	/*
-	 * If unique-ification is requested, do it and then handle as a plain
-	 * inner join.
-	 */
-	if (jointype == JOIN_UNIQUE_OUTER)
-	{
-		outer_path = (Path *) create_unique_path(root, outerrel,
-												 outer_path, extra->sjinfo);
-		Assert(outer_path);
-		jointype = JOIN_INNER;
-	}
-	else if (jointype == JOIN_UNIQUE_INNER)
-	{
-		inner_path = (Path *) create_unique_path(root, innerrel,
-												 inner_path, extra->sjinfo);
-		Assert(inner_path);
-		jointype = JOIN_INNER;
-	}
-
-	/*
 	 * If the joinrel is parallel-safe, we may be able to consider a partial
 	 * merge join.  However, we can't handle JOIN_UNIQUE_OUTER, because the
 	 * outer path will be partial, and therefore we won't be able to properly
@@ -1441,7 +1429,7 @@ sort_inner_and_outer(PlannerInfo *root,
 
 		if (inner_path->parallel_safe)
 			cheapest_safe_inner = inner_path;
-		else if (save_jointype != JOIN_UNIQUE_INNER)
+		else
 			cheapest_safe_inner =
 				get_cheapest_parallel_safe_total_inner(innerrel->pathlist);
 	}
@@ -1580,12 +1568,10 @@ generate_mergejoin_paths(PlannerInfo *root,
 	List	   *trialsortkeys;
 	Path	   *cheapest_startup_inner;
 	Path	   *cheapest_total_inner;
-	JoinType	save_jointype = jointype;
 	int			num_sortkeys;
 	int			sortkeycnt;
 
-	if (jointype == JOIN_UNIQUE_OUTER || jointype == JOIN_UNIQUE_INNER)
-		jointype = JOIN_INNER;
+	Assert(jointype != JOIN_UNIQUE_OUTER && jointype != JOIN_UNIQUE_INNER);
 
 	/* Look for useful mergeclauses (if any) */
 	mergeclauses =
@@ -1635,10 +1621,6 @@ generate_mergejoin_paths(PlannerInfo *root,
 					   jointype,
 					   extra,
 					   is_partial);
-
-	/* Can't do anything else if inner path needs to be unique'd */
-	if (save_jointype == JOIN_UNIQUE_INNER)
-		return;
 
 	/*
 	 * Look for presorted inner paths that satisfy the innersortkey list ---
@@ -1877,20 +1859,7 @@ match_unsorted_outer(PlannerInfo *root,
 	if (PATH_PARAM_BY_REL(inner_cheapest_total, outerrel))
 		inner_cheapest_total = NULL;
 
-	/*
-	 * If we need to unique-ify the inner path, we will consider only the
-	 * cheapest-total inner.
-	 */
-	if (save_jointype == JOIN_UNIQUE_INNER)
-	{
-		/* No way to do this with an inner path parameterized by outer rel */
-		if (inner_cheapest_total == NULL)
-			return;
-		inner_cheapest_total = (Path *)
-			create_unique_path(root, innerrel, inner_cheapest_total, extra->sjinfo);
-		Assert(inner_cheapest_total);
-	}
-	else if (nestjoinOK)
+	if (nestjoinOK)
 	{
 		/*
 		 * Consider materializing the cheapest inner path, unless
@@ -1915,20 +1884,6 @@ match_unsorted_outer(PlannerInfo *root,
 			continue;
 
 		/*
-		 * If we need to unique-ify the outer path, it's pointless to consider
-		 * any but the cheapest outer.  (XXX we don't consider parameterized
-		 * outers, nor inners, for unique-ified cases.  Should we?)
-		 */
-		if (save_jointype == JOIN_UNIQUE_OUTER)
-		{
-			if (outerpath != outerrel->cheapest_total_path)
-				continue;
-			outerpath = (Path *) create_unique_path(root, outerrel,
-													outerpath, extra->sjinfo);
-			Assert(outerpath);
-		}
-
-		/*
 		 * The result will have this sort order (even if it is implemented as
 		 * a nestloop, and even if some of the mergeclauses are implemented by
 		 * qpquals rather than as true mergeclauses):
@@ -1936,21 +1891,7 @@ match_unsorted_outer(PlannerInfo *root,
 		merge_pathkeys = build_join_pathkeys(root, joinrel, jointype,
 											 outerpath->pathkeys);
 
-		if (save_jointype == JOIN_UNIQUE_INNER)
-		{
-			/*
-			 * Consider nestloop join, but only with the unique-ified cheapest
-			 * inner path
-			 */
-			try_nestloop_path(root,
-							  joinrel,
-							  outerpath,
-							  inner_cheapest_total,
-							  merge_pathkeys,
-							  jointype,
-							  extra);
-		}
-		else if (nestjoinOK)
+		if (nestjoinOK)
 		{
 			/*
 			 * Consider nestloop joins using this outer path and various
@@ -2001,17 +1942,13 @@ match_unsorted_outer(PlannerInfo *root,
 								  extra);
 		}
 
-		/* Can't do anything else if outer path needs to be unique'd */
-		if (save_jointype == JOIN_UNIQUE_OUTER)
-			continue;
-
 		/* Can't do anything else if inner rel is parameterized by outer */
 		if (inner_cheapest_total == NULL)
 			continue;
 
 		/* Generate merge join paths */
 		generate_mergejoin_paths(root, joinrel, innerrel, outerpath,
-								 save_jointype, extra, useallclauses,
+								 jointype, extra, useallclauses,
 								 inner_cheapest_total, merge_pathkeys,
 								 false);
 	}
@@ -2035,25 +1972,22 @@ match_unsorted_outer(PlannerInfo *root,
 	{
 		if (nestjoinOK)
 			consider_parallel_nestloop(root, joinrel, outerrel, innerrel,
-									   save_jointype, extra);
+									   jointype, extra);
 
 		/*
 		 * If inner_cheapest_total is NULL or non parallel-safe then find the
-		 * cheapest total parallel safe path.  If doing JOIN_UNIQUE_INNER, we
-		 * can't use any alternative inner path.
+		 * cheapest total parallel safe path.
 		 */
 		if (inner_cheapest_total == NULL ||
 			!inner_cheapest_total->parallel_safe)
 		{
-			if (save_jointype == JOIN_UNIQUE_INNER)
-				return;
-
-			inner_cheapest_total = get_cheapest_parallel_safe_total_inner(innerrel->pathlist);
+			inner_cheapest_total =
+				get_cheapest_parallel_safe_total_inner(innerrel->pathlist);
 		}
 
 		if (inner_cheapest_total)
 			consider_parallel_mergejoin(root, joinrel, outerrel, innerrel,
-										save_jointype, extra,
+										jointype, extra,
 										inner_cheapest_total);
 	}
 }
@@ -2118,24 +2052,17 @@ consider_parallel_nestloop(PlannerInfo *root,
 						   JoinType jointype,
 						   JoinPathExtraData *extra)
 {
-	JoinType	save_jointype = jointype;
 	Path	   *inner_cheapest_total = innerrel->cheapest_total_path;
 	Path	   *matpath = NULL;
 	ListCell   *lc1;
 
-	if (jointype == JOIN_UNIQUE_INNER)
-		jointype = JOIN_INNER;
-
 	/*
-	 * Consider materializing the cheapest inner path, unless: 1) we're doing
-	 * JOIN_UNIQUE_INNER, because in this case we have to unique-ify the
-	 * cheapest inner path, 2) enable_material is off, 3) the cheapest inner
-	 * path is not parallel-safe, 4) the cheapest inner path is parameterized
-	 * by the outer rel, or 5) the cheapest inner path materializes its output
-	 * anyway.
+	 * Consider materializing the cheapest inner path, unless: 1)
+	 * enable_material is off, 2) the cheapest inner path is not parallel-safe,
+	 * 3) the cheapest inner path is parameterized by the outer rel, or 4) the
+	 * cheapest inner path materializes its output anyway.
 	 */
-	if (save_jointype != JOIN_UNIQUE_INNER &&
-		enable_material && inner_cheapest_total->parallel_safe &&
+	if (enable_material && inner_cheapest_total->parallel_safe &&
 		!PATH_PARAM_BY_REL(inner_cheapest_total, outerrel) &&
 		!ExecMaterializesOutput(inner_cheapest_total->pathtype))
 	{
@@ -2168,23 +2095,6 @@ consider_parallel_nestloop(PlannerInfo *root,
 			/* Can't join to an inner path that is not parallel-safe */
 			if (!innerpath->parallel_safe)
 				continue;
-
-			/*
-			 * If we're doing JOIN_UNIQUE_INNER, we can only use the inner's
-			 * cheapest_total_path, and we have to unique-ify it.  (We might
-			 * be able to relax this to allow other safe, unparameterized
-			 * inner paths, but right now create_unique_path is not on board
-			 * with that.)
-			 */
-			if (save_jointype == JOIN_UNIQUE_INNER)
-			{
-				if (innerpath != innerrel->cheapest_total_path)
-					continue;
-				innerpath = (Path *) create_unique_path(root, innerrel,
-														innerpath,
-														extra->sjinfo);
-				Assert(innerpath);
-			}
 
 			try_partial_nestloop_path(root, joinrel, outerpath, innerpath,
 									  pathkeys, jointype, extra);
@@ -2231,6 +2141,13 @@ hash_inner_and_outer(PlannerInfo *root,
 	bool		isouterjoin = IS_OUTER_JOIN(jointype);
 	List	   *hashclauses;
 	ListCell   *l;
+
+	/*
+	 * If the outer or inner relation has been unique-ified, handle as a plain
+	 * inner join.
+	 */
+	if (jointype == JOIN_UNIQUE_OUTER || jointype == JOIN_UNIQUE_INNER)
+		jointype = JOIN_INNER;
 
 	/*
 	 * We need to build only one hashclauses list for any given pair of outer
@@ -2290,6 +2207,8 @@ hash_inner_and_outer(PlannerInfo *root,
 		Path	   *cheapest_startup_outer = outerrel->cheapest_startup_path;
 		Path	   *cheapest_total_outer = outerrel->cheapest_total_path;
 		Path	   *cheapest_total_inner = innerrel->cheapest_total_path;
+		ListCell   *lc1;
+		ListCell   *lc2;
 
 		/*
 		 * If either cheapest-total path is parameterized by the other rel, we
@@ -2301,102 +2220,55 @@ hash_inner_and_outer(PlannerInfo *root,
 			PATH_PARAM_BY_REL(cheapest_total_inner, outerrel))
 			return;
 
-		/* Unique-ify if need be; we ignore parameterized possibilities */
-		if (jointype == JOIN_UNIQUE_OUTER)
-		{
-			cheapest_total_outer = (Path *)
-				create_unique_path(root, outerrel,
-								   cheapest_total_outer, extra->sjinfo);
-			Assert(cheapest_total_outer);
-			jointype = JOIN_INNER;
+		/*
+		 * Consider the cheapest startup outer together with the cheapest total
+		 * inner, and then consider pairings of cheapest-total paths including
+		 * parameterized ones.  There is no use in generating parameterized
+		 * paths on the basis of possibly cheap startup cost, so this is
+		 * sufficient.
+		 */
+		if (cheapest_startup_outer != NULL)
 			try_hashjoin_path(root,
 							  joinrel,
-							  cheapest_total_outer,
+							  cheapest_startup_outer,
 							  cheapest_total_inner,
 							  hashclauses,
 							  jointype,
 							  extra);
-			/* no possibility of cheap startup here */
-		}
-		else if (jointype == JOIN_UNIQUE_INNER)
+
+		foreach(lc1, outerrel->cheapest_parameterized_paths)
 		{
-			cheapest_total_inner = (Path *)
-				create_unique_path(root, innerrel,
-								   cheapest_total_inner, extra->sjinfo);
-			Assert(cheapest_total_inner);
-			jointype = JOIN_INNER;
-			try_hashjoin_path(root,
-							  joinrel,
-							  cheapest_total_outer,
-							  cheapest_total_inner,
-							  hashclauses,
-							  jointype,
-							  extra);
-			if (cheapest_startup_outer != NULL &&
-				cheapest_startup_outer != cheapest_total_outer)
-				try_hashjoin_path(root,
-								  joinrel,
-								  cheapest_startup_outer,
-								  cheapest_total_inner,
-								  hashclauses,
-								  jointype,
-								  extra);
-		}
-		else
-		{
+			Path	   *outerpath = (Path *) lfirst(lc1);
+
 			/*
-			 * For other jointypes, we consider the cheapest startup outer
-			 * together with the cheapest total inner, and then consider
-			 * pairings of cheapest-total paths including parameterized ones.
-			 * There is no use in generating parameterized paths on the basis
-			 * of possibly cheap startup cost, so this is sufficient.
+			 * We cannot use an outer path that is parameterized by the
+			 * inner rel.
 			 */
-			ListCell   *lc1;
-			ListCell   *lc2;
+			if (PATH_PARAM_BY_REL(outerpath, innerrel))
+				continue;
 
-			if (cheapest_startup_outer != NULL)
-				try_hashjoin_path(root,
-								  joinrel,
-								  cheapest_startup_outer,
-								  cheapest_total_inner,
-								  hashclauses,
-								  jointype,
-								  extra);
-
-			foreach(lc1, outerrel->cheapest_parameterized_paths)
+			foreach(lc2, innerrel->cheapest_parameterized_paths)
 			{
-				Path	   *outerpath = (Path *) lfirst(lc1);
+				Path	   *innerpath = (Path *) lfirst(lc2);
 
 				/*
-				 * We cannot use an outer path that is parameterized by the
-				 * inner rel.
+				 * We cannot use an inner path that is parameterized by
+				 * the outer rel, either.
 				 */
-				if (PATH_PARAM_BY_REL(outerpath, innerrel))
+				if (PATH_PARAM_BY_REL(innerpath, outerrel))
 					continue;
 
-				foreach(lc2, innerrel->cheapest_parameterized_paths)
-				{
-					Path	   *innerpath = (Path *) lfirst(lc2);
+				if (outerpath == cheapest_startup_outer &&
+					innerpath == cheapest_total_inner)
+					continue;	/* already tried it */
 
-					/*
-					 * We cannot use an inner path that is parameterized by
-					 * the outer rel, either.
-					 */
-					if (PATH_PARAM_BY_REL(innerpath, outerrel))
-						continue;
-
-					if (outerpath == cheapest_startup_outer &&
-						innerpath == cheapest_total_inner)
-						continue;	/* already tried it */
-
-					try_hashjoin_path(root,
-									  joinrel,
-									  outerpath,
-									  innerpath,
-									  hashclauses,
-									  jointype,
-									  extra);
-				}
+				try_hashjoin_path(root,
+								  joinrel,
+								  outerpath,
+								  innerpath,
+								  hashclauses,
+								  jointype,
+								  extra);
 			}
 		}
 
@@ -2441,9 +2313,8 @@ hash_inner_and_outer(PlannerInfo *root,
 			 * Normally, given that the joinrel is parallel-safe, the cheapest
 			 * total inner path will also be parallel-safe, but if not, we'll
 			 * have to search for the cheapest safe, unparameterized inner
-			 * path.  If doing JOIN_UNIQUE_INNER, we can't use any alternative
-			 * inner path.  If full, right, right-semi or right-anti join, we
-			 * can't use parallelism (building the hash table in each backend)
+			 * path.  If full, right, right-semi or right-anti join, we can't
+			 * use parallelism (building the hash table in each backend)
 			 * because no one process has all the match bits.
 			 */
 			if (save_jointype == JOIN_FULL ||
@@ -2453,7 +2324,7 @@ hash_inner_and_outer(PlannerInfo *root,
 				cheapest_safe_inner = NULL;
 			else if (cheapest_total_inner->parallel_safe)
 				cheapest_safe_inner = cheapest_total_inner;
-			else if (save_jointype != JOIN_UNIQUE_INNER)
+			else
 				cheapest_safe_inner =
 					get_cheapest_parallel_safe_total_inner(innerrel->pathlist);
 
