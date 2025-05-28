@@ -8427,6 +8427,10 @@ create_unique_paths(PlannerInfo *root, RelOptInfo *rel, SpecialJoinInfo *sjinfo)
 	/* Now choose the best path(s) */
 	set_cheapest(unique_rel);
 
+	/*
+	 * There should be no partial paths for the unique relation; otherwise, we
+	 * won't be able to properly guarantee uniqueness.
+	 */
 	Assert(unique_rel->partial_pathlist == NIL);
 
 	/* Cache the result */
@@ -8562,6 +8566,8 @@ create_partial_unique_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	if (!input_rel->consider_parallel || input_rel->partial_pathlist == NIL)
 		return;
 
+	cheapest_partial_path = linitial(input_rel->partial_pathlist);
+
 	partial_unique_rel = makeNode(RelOptInfo);
 	memcpy(partial_unique_rel, input_rel, sizeof(RelOptInfo));
 
@@ -8574,8 +8580,6 @@ create_partial_unique_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	partial_unique_rel->cheapest_startup_path = NULL;
 	partial_unique_rel->cheapest_total_path = NULL;
 	partial_unique_rel->cheapest_parameterized_paths = NIL;
-
-	cheapest_partial_path = linitial(input_rel->partial_pathlist);
 
 	/* Estimate number of output rows */
 	partial_unique_rel->rows = estimate_num_groups(root,
@@ -8677,7 +8681,7 @@ create_partial_unique_paths(PlannerInfo *root, RelOptInfo *input_rel,
 										groupClause,
 										NIL,
 										NULL,
-										cheapest_partial_path->rows);
+										partial_unique_rel->rows);
 
 		add_partial_path(partial_unique_rel, path);
 	}
