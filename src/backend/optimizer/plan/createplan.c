@@ -6548,7 +6548,8 @@ make_group(List *tlist,
 }
 
 /*
- * as above, but use pathkeys to identify the sort columns and semantics
+ * pathkeys is a list of PathKeys, identifying the sort columns and semantics.
+ * The input path must already be sorted accordingly.
  */
 static Unique *
 make_unique_from_pathkeys(Plan *lefttree, List *pathkeys, int numCols,

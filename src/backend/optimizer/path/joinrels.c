@@ -894,6 +894,8 @@ populate_joinrel_with_paths(PlannerInfo *root, RelOptInfo *rel1,
 							RelOptInfo *rel2, RelOptInfo *joinrel,
 							SpecialJoinInfo *sjinfo, List *restrictlist)
 {
+	RelOptInfo *unique_rel2;
+
 	/*
 	 * Consider paths using each rel as both outer and inner.  Depending on
 	 * the join type, a provably empty outer or inner rel might mean the join
@@ -973,8 +975,6 @@ populate_joinrel_with_paths(PlannerInfo *root, RelOptInfo *rel1,
 			break;
 		case JOIN_SEMI:
 
-			RelOptInfo *rel2_unique;
-
 			/*
 			 * We might have a normal semijoin, or a case where we don't have
 			 * enough rels to do the semijoin but can unique-ify the RHS and
@@ -1007,7 +1007,7 @@ populate_joinrel_with_paths(PlannerInfo *root, RelOptInfo *rel1,
 			 * anyway to be sure.)
 			 */
 			if (bms_equal(sjinfo->syn_righthand, rel2->relids) &&
-				(rel2_unique = create_unique_paths(root, rel2, sjinfo)) != NULL)
+				(unique_rel2 = create_unique_paths(root, rel2, sjinfo)) != NULL)
 			{
 				if (is_dummy_rel(rel1) || is_dummy_rel(rel2) ||
 					restriction_is_constant_false(restrictlist, joinrel, false))
@@ -1015,10 +1015,10 @@ populate_joinrel_with_paths(PlannerInfo *root, RelOptInfo *rel1,
 					mark_dummy_rel(joinrel);
 					break;
 				}
-				add_paths_to_joinrel(root, joinrel, rel1, rel2_unique,
+				add_paths_to_joinrel(root, joinrel, rel1, unique_rel2,
 									 JOIN_UNIQUE_INNER, sjinfo,
 									 restrictlist);
-				add_paths_to_joinrel(root, joinrel, rel2_unique, rel1,
+				add_paths_to_joinrel(root, joinrel, unique_rel2, rel1,
 									 JOIN_UNIQUE_OUTER, sjinfo,
 									 restrictlist);
 			}

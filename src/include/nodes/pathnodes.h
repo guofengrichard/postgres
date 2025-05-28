@@ -1005,7 +1005,7 @@ typedef struct RelOptInfo
 	 * information about unique-ification of this relation
 	 */
 	struct RelOptInfo *unique_rel;
-	List			  *unique_pathkeys;
+	List	   *unique_pathkeys;
 
 	/*
 	 * used by various scans and joins:

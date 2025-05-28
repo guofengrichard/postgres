@@ -161,10 +161,10 @@ add_paths_to_joinrel(PlannerInfo *root,
 	 * (else reduce_unique_semijoins would've simplified it), so there's no
 	 * point in calling innerrel_is_unique.  However, if the LHS covers all of
 	 * the semijoin's min_lefthand, then it's appropriate to set inner_unique
-	 * because the unique relation produced by create_unique_paths will be unique relative
-	 * to the LHS.  (If we have an LHS that's only part of the min_lefthand,
-	 * that is *not* true.)  For JOIN_UNIQUE_OUTER, pass JOIN_INNER to avoid
-	 * letting that value escape this module.
+	 * because the unique relation produced by create_unique_paths will be
+	 * unique relative to the LHS.  (If we have an LHS that's only part of the
+	 * min_lefthand, that is *not* true.)  For JOIN_UNIQUE_OUTER, pass
+	 * JOIN_INNER to avoid letting that value escape this module.
 	 */
 	switch (jointype)
 	{
@@ -2058,9 +2058,9 @@ consider_parallel_nestloop(PlannerInfo *root,
 
 	/*
 	 * Consider materializing the cheapest inner path, unless: 1)
-	 * enable_material is off, 2) the cheapest inner path is not parallel-safe,
-	 * 3) the cheapest inner path is parameterized by the outer rel, or 4) the
-	 * cheapest inner path materializes its output anyway.
+	 * enable_material is off, 2) the cheapest inner path is not
+	 * parallel-safe, 3) the cheapest inner path is parameterized by the outer
+	 * rel, or 4) the cheapest inner path materializes its output anyway.
 	 */
 	if (enable_material && inner_cheapest_total->parallel_safe &&
 		!PATH_PARAM_BY_REL(inner_cheapest_total, outerrel) &&
@@ -2221,11 +2221,11 @@ hash_inner_and_outer(PlannerInfo *root,
 			return;
 
 		/*
-		 * Consider the cheapest startup outer together with the cheapest total
-		 * inner, and then consider pairings of cheapest-total paths including
-		 * parameterized ones.  There is no use in generating parameterized
-		 * paths on the basis of possibly cheap startup cost, so this is
-		 * sufficient.
+		 * Consider the cheapest startup outer together with the cheapest
+		 * total inner, and then consider pairings of cheapest-total paths
+		 * including parameterized ones.  There is no use in generating
+		 * parameterized paths on the basis of possibly cheap startup cost, so
+		 * this is sufficient.
 		 */
 		if (cheapest_startup_outer != NULL)
 			try_hashjoin_path(root,
@@ -2241,8 +2241,8 @@ hash_inner_and_outer(PlannerInfo *root,
 			Path	   *outerpath = (Path *) lfirst(lc1);
 
 			/*
-			 * We cannot use an outer path that is parameterized by the
-			 * inner rel.
+			 * We cannot use an outer path that is parameterized by the inner
+			 * rel.
 			 */
 			if (PATH_PARAM_BY_REL(outerpath, innerrel))
 				continue;
@@ -2252,8 +2252,8 @@ hash_inner_and_outer(PlannerInfo *root,
 				Path	   *innerpath = (Path *) lfirst(lc2);
 
 				/*
-				 * We cannot use an inner path that is parameterized by
-				 * the outer rel, either.
+				 * We cannot use an inner path that is parameterized by the
+				 * outer rel, either.
 				 */
 				if (PATH_PARAM_BY_REL(innerpath, outerrel))
 					continue;

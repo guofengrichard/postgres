@@ -2921,7 +2921,6 @@ create_unique_path(PlannerInfo *root,
 	pathnode->path.parent = rel;
 	/* Unique doesn't project, so use source path's pathtarget */
 	pathnode->path.pathtarget = subpath->pathtarget;
-	/* For now, assume we are above any joins, so no parameterization */
 	pathnode->path.param_info = subpath->param_info;
 	pathnode->path.parallel_aware = false;
 	pathnode->path.parallel_safe = rel->consider_parallel &&

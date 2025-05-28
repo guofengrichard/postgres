@@ -8271,7 +8271,7 @@ create_unique_paths(PlannerInfo *root, RelOptInfo *rel, SpecialJoinInfo *sjinfo)
 	RelOptInfo *unique_rel;
 	List	   *newtlist;
 	int			nextresno;
-	List       *sortList = NIL;
+	List	   *sortList = NIL;
 	List	   *sortPathkeys = NIL;
 	List	   *groupClause = NIL;
 	MemoryContext oldcontext;
@@ -8327,8 +8327,8 @@ create_unique_paths(PlannerInfo *root, RelOptInfo *rel, SpecialJoinInfo *sjinfo)
 	 * variables of the input rel's targetlist.  We have to add any such
 	 * expressions to the unique rel's tlist.
 	 *
-	 * While in the loop, build the lists of SortGroupClause's representing the
-	 * ordering for the sort-based implementation and the grouping for
+	 * While in the loop, build the lists of SortGroupClause's representing
+	 * the ordering for the sort-based implementation and the grouping for
 	 * hash-based implementation.
 	 */
 	newtlist = make_tlist_from_pathtarget(rel->reltarget);
@@ -8392,8 +8392,8 @@ create_unique_paths(PlannerInfo *root, RelOptInfo *rel, SpecialJoinInfo *sjinfo)
 			/*
 			 * Get the hashable equality operators for the Agg node to use.
 			 * Normally these are the same as the IN clause operators, but if
-			 * those are cross-type operators then the equality operators are the
-			 * ones for the IN clause operators' RHS datatype.
+			 * those are cross-type operators then the equality operators are
+			 * the ones for the IN clause operators' RHS datatype.
 			 */
 			if (!get_compatible_hash_operators(in_oper, NULL, &eq_oper))
 				elog(ERROR, "could not find compatible hash operator for operator %u",
@@ -8450,7 +8450,7 @@ create_final_unique_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	/* Consider sort-based implementations, if possible. */
 	if (sjinfo->semi_can_btree)
 	{
-		ListCell	   *lc;
+		ListCell   *lc;
 
 		/*
 		 * Use any available suitably-sorted path as input, and also consider
@@ -8520,7 +8520,7 @@ create_final_unique_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	/* Consider hash-based implementation, if possible. */
 	if (sjinfo->semi_can_hash)
 	{
-		Path       *path;
+		Path	   *path;
 
 		/*
 		 * Make a separate ProjectionPath in case we need a Result node.
@@ -8588,7 +8588,7 @@ create_partial_unique_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	/* Consider sort-based implementations, if possible. */
 	if (sjinfo->semi_can_btree)
 	{
-		ListCell	   *lc;
+		ListCell   *lc;
 
 		/*
 		 * Use any available suitably-sorted path as input, and also consider
@@ -8658,7 +8658,7 @@ create_partial_unique_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	/* Consider hash-based implementation, if possible. */
 	if (sjinfo->semi_can_hash)
 	{
-		Path       *path;
+		Path	   *path;
 
 		/*
 		 * Make a separate ProjectionPath in case we need a Result node.
