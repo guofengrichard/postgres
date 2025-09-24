@@ -439,7 +439,8 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 	}
 
 	/* primary planning entry point (may recurse for subqueries) */
-	root = subquery_planner(glob, parse, NULL, false, tuple_fraction, NULL);
+	root = subquery_planner(glob, parse, NULL, NULL, false, tuple_fraction,
+							NULL);
 
 	/* Select best Path and turn it into a Plan */
 	final_rel = fetch_upper_rel(root, UPPERREL_FINAL, NULL);
@@ -656,9 +657,9 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
  *--------------------
  */
 PlannerInfo *
-subquery_planner(PlannerGlobal *glob, Query *parse, PlannerInfo *parent_root,
-				 bool hasRecursion, double tuple_fraction,
-				 SetOperationStmt *setops)
+subquery_planner(PlannerGlobal *glob, Query *parse, char *plan_name,
+				 PlannerInfo *parent_root, bool hasRecursion,
+				 double tuple_fraction, SetOperationStmt *setops)
 {
 	PlannerInfo *root;
 	List	   *newWithCheckOptions;
@@ -673,6 +674,7 @@ subquery_planner(PlannerGlobal *glob, Query *parse, PlannerInfo *parent_root,
 	root->parse = parse;
 	root->glob = glob;
 	root->query_level = parent_root ? parent_root->query_level + 1 : 1;
+	root->plan_name = plan_name;
 	root->parent_root = parent_root;
 	root->plan_params = NIL;
 	root->outer_params = NULL;
@@ -709,6 +711,9 @@ subquery_planner(PlannerGlobal *glob, Query *parse, PlannerInfo *parent_root,
 		root->wt_param_id = -1;
 	root->non_recursive_path = NULL;
 	root->partColsUpdated = false;
+
+	/* Add this to list of all PlannerInfo objects. */
+	root->glob->allroots = lappend(root->glob->allroots, root);
 
 	/*
 	 * Create the top-level join domain.  This won't have valid contents until
@@ -8831,5 +8836,63 @@ create_partial_unique_paths(PlannerInfo *root, RelOptInfo *input_rel,
 		create_final_unique_paths(root, partial_unique_rel,
 								  sortPathkeys, groupClause,
 								  sjinfo, unique_rel);
+	}
+}
+
+/*
+ * Choose a unique plan name for subroot.
+ */
+char *
+choose_plan_name(PlannerGlobal *glob, const char *name, bool always_number)
+{
+	unsigned	n;
+
+	/*
+	 * If a numeric suffix is not required, then search the list of roots for
+	 * a plan with the requested name. If none is found, then we can use the
+	 * provided name without modification.
+	 */
+	if (!always_number)
+	{
+		bool		found = false;
+
+		foreach_node(PlannerInfo, root, glob->allroots)
+		{
+			if (root->plan_name != NULL &&
+				strcmp(name, root->plan_name) == 0)
+			{
+				found = true;
+				break;
+			}
+		}
+
+		if (!found)
+			return pstrdup(name);
+	}
+
+	/*
+	 * If a numeric suffix is required or if the un-suffixed name is already
+	 * in use, then loop until we find a positive integer that produces a
+	 * novel name.
+	 */
+	for (n = 1; true; ++n)
+	{
+		char	   *proposed_name = psprintf("%s_%u", name, n);
+		bool		found = false;
+
+		foreach_node(PlannerInfo, root, glob->allroots)
+		{
+			if (root->plan_name != NULL &&
+				strcmp(proposed_name, root->plan_name) == 0)
+			{
+				found = true;
+				break;
+			}
+		}
+
+		if (!found)
+			return proposed_name;
+
+		pfree(proposed_name);
 	}
 }

@@ -1356,6 +1356,7 @@ pull_up_simple_subquery(PlannerInfo *root, Node *jtnode, RangeTblEntry *rte,
 	subroot->parse = subquery;
 	subroot->glob = root->glob;
 	subroot->query_level = root->query_level;
+	subroot->plan_name = root->plan_name;
 	subroot->parent_root = root->parent_root;
 	subroot->plan_params = NIL;
 	subroot->outer_params = NULL;
@@ -1386,6 +1387,9 @@ pull_up_simple_subquery(PlannerInfo *root, Node *jtnode, RangeTblEntry *rte,
 	subroot->wt_param_id = -1;
 	subroot->non_recursive_path = NULL;
 	/* We don't currently need a top JoinDomain for the subroot */
+
+	/* Add new subroot to master list of PlannerInfo objects. */
+	root->glob->allroots = lappend(root->glob->allroots, subroot);
 
 	/* No CTEs to worry about */
 	Assert(subquery->cteList == NIL);

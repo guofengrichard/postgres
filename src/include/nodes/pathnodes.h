@@ -110,6 +110,9 @@ typedef struct PlannerGlobal
 	/* PlannerInfos for SubPlan nodes */
 	List	   *subroots pg_node_attr(read_write_ignore);
 
+	/* every PlannerInfo regardless of whether it's an InitPlan/SubPlan */
+	List	   *allroots pg_node_attr(read_write_ignore);
+
 	/* indices of subplans that require REWIND */
 	Bitmapset  *rewindPlanIDs;
 
@@ -227,6 +230,9 @@ struct PlannerInfo
 
 	/* NULL at outermost Query */
 	PlannerInfo *parent_root pg_node_attr(read_write_ignore);
+
+	/* Name for EXPLAIN and debugging purposes */
+	char	   *plan_name;
 
 	/*
 	 * plan_params contains the expressions that this query level needs to
