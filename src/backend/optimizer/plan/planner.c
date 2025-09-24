@@ -1097,10 +1097,11 @@ subquery_planner(PlannerGlobal *glob, Query *parse, PlannerInfo *parent_root,
 	 * cannot do so if the HAVING clause contains aggregates (obviously) or
 	 * volatile functions (since a HAVING clause is supposed to be executed
 	 * only once per group).  We also can't do this if there are any nonempty
-	 * grouping sets and the clause references any columns that are nullable
-	 * by the grouping sets; moving such a clause into WHERE would potentially
-	 * change the results.  (If there are only empty grouping sets, then the
-	 * HAVING clause must be degenerate as discussed below.)
+	 * grouping sets and the clause either references any columns that are
+	 * nullable by the grouping sets or is degenerate; moving such a clause
+	 * into WHERE would potentially change the results.  (If there are only
+	 * empty grouping sets, then the HAVING clause must be degenerate as
+	 * discussed below.)
 	 *
 	 * Also, it may be that the clause is so expensive to execute that we're
 	 * better off doing it only once per group, despite the loss of
@@ -1137,12 +1138,14 @@ subquery_planner(PlannerGlobal *glob, Query *parse, PlannerInfo *parent_root,
 	foreach(l, (List *) parse->havingQual)
 	{
 		Node	   *havingclause = (Node *) lfirst(l);
+		Relids		having_relids;
 
 		if (contain_agg_clause(havingclause) ||
 			contain_volatile_functions(havingclause) ||
 			contain_subplans(havingclause) ||
 			(parse->groupClause && parse->groupingSets &&
-			 bms_is_member(root->group_rtindex, pull_varnos(root, havingclause))))
+			 ((having_relids = pull_varnos(root, havingclause)) == NULL ||
+			  bms_is_member(root->group_rtindex, having_relids))))
 		{
 			/* keep it in HAVING */
 			newHaving = lappend(newHaving, havingclause);
