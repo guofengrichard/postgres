@@ -1269,7 +1269,7 @@ explain (costs off)
                  ->  Index Only Scan Backward using minmaxtest2i on minmaxtest2 minmaxtest_3
                        Index Cond: (f1 IS NOT NULL)
                  ->  Index Only Scan using minmaxtest3i on minmaxtest3 minmaxtest_4
-   InitPlan minmax_1
+   InitPlan minmax_2
      ->  Limit
            ->  Merge Append
                  Sort Key: minmaxtest_5.f1 DESC
@@ -1305,7 +1305,7 @@ explain (costs off)
                  ->  Index Only Scan Backward using minmaxtest2i on minmaxtest2 minmaxtest_3
                        Index Cond: (f1 IS NOT NULL)
                  ->  Index Only Scan using minmaxtest3i on minmaxtest3 minmaxtest_4
-   InitPlan minmax_1
+   InitPlan minmax_2
      ->  Limit
            ->  Merge Append
                  Sort Key: minmaxtest_5.f1 DESC
@@ -1317,7 +1317,7 @@ explain (costs off)
                        Index Cond: (f1 IS NOT NULL)
                  ->  Index Only Scan Backward using minmaxtest3i on minmaxtest3 minmaxtest_9
    ->  Sort
-         Sort Key: ((InitPlan minmax_1).col1), ((InitPlan minmax_1).col1)
+         Sort Key: ((InitPlan minmax_1).col1), ((InitPlan minmax_2).col1)
          ->  Result
                Replaces: MinMaxAggregate
 (27 rows)

@@ -362,9 +362,6 @@ build_minmax_path(PlannerInfo *root, MinMaxAggInfo *mminfo,
 	/* and we haven't created PlaceHolderInfos, either */
 	Assert(subroot->placeholder_list == NIL);
 
-	/* Add this to list of all PlannerInfo objects. */
-	root->glob->allroots = lappend(root->glob->allroots, root);
-
 	/*----------
 	 * Generate modified query of the form
 	 *		(SELECT col FROM tab

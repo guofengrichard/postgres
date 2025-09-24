@@ -631,6 +631,7 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
  *
  * glob is the global state for the current planner run.
  * parse is the querytree produced by the parser & rewriter.
+ * plan_name is the name to assign to this subplan (NULL at the top level).
  * parent_root is the immediate parent Query's info (NULL at the top level).
  * hasRecursion is true if this is a recursive WITH query.
  * tuple_fraction is the fraction of tuples we expect will be retrieved.
@@ -711,9 +712,6 @@ subquery_planner(PlannerGlobal *glob, Query *parse, char *plan_name,
 		root->wt_param_id = -1;
 	root->non_recursive_path = NULL;
 	root->partColsUpdated = false;
-
-	/* Add this to list of all PlannerInfo objects. */
-	root->glob->allroots = lappend(root->glob->allroots, root);
 
 	/*
 	 * Create the top-level join domain.  This won't have valid contents until
@@ -8840,7 +8838,9 @@ create_partial_unique_paths(PlannerInfo *root, RelOptInfo *input_rel,
 }
 
 /*
- * Choose a unique plan name for subroot.
+ * Choose a unique name for some subroot.
+ *
+ * Modifies glob->subplanNames to track names already used.
  */
 char *
 choose_plan_name(PlannerGlobal *glob, const char *name, bool always_number)
@@ -8848,18 +8848,17 @@ choose_plan_name(PlannerGlobal *glob, const char *name, bool always_number)
 	unsigned	n;
 
 	/*
-	 * If a numeric suffix is not required, then search the list of roots for
-	 * a plan with the requested name. If none is found, then we can use the
-	 * provided name without modification.
+	 * If a numeric suffix is not required, then search the list of
+	 * previously-assigned names for a match. If none is found, then we can
+	 * use the provided name without modification.
 	 */
 	if (!always_number)
 	{
 		bool		found = false;
 
-		foreach_node(PlannerInfo, root, glob->allroots)
+		foreach_ptr(char, subplan_name, glob->subplanNames)
 		{
-			if (root->plan_name != NULL &&
-				strcmp(name, root->plan_name) == 0)
+			if (strcmp(subplan_name, name) == 0)
 			{
 				found = true;
 				break;
@@ -8867,7 +8866,13 @@ choose_plan_name(PlannerGlobal *glob, const char *name, bool always_number)
 		}
 
 		if (!found)
-			return pstrdup(name);
+		{
+			/* pstrdup here is just to avoid cast-away-const */
+			char	   *chosen_name = pstrdup(name);
+
+			glob->subplanNames = lappend(glob->subplanNames, chosen_name);
+			return chosen_name;
+		}
 	}
 
 	/*
@@ -8880,10 +8885,9 @@ choose_plan_name(PlannerGlobal *glob, const char *name, bool always_number)
 		char	   *proposed_name = psprintf("%s_%u", name, n);
 		bool		found = false;
 
-		foreach_node(PlannerInfo, root, glob->allroots)
+		foreach_ptr(char, subplan_name, glob->subplanNames)
 		{
-			if (root->plan_name != NULL &&
-				strcmp(proposed_name, root->plan_name) == 0)
+			if (strcmp(subplan_name, proposed_name) == 0)
 			{
 				found = true;
 				break;
@@ -8891,7 +8895,10 @@ choose_plan_name(PlannerGlobal *glob, const char *name, bool always_number)
 		}
 
 		if (!found)
+		{
+			glob->subplanNames = lappend(glob->subplanNames, proposed_name);
 			return proposed_name;
+		}
 
 		pfree(proposed_name);
 	}

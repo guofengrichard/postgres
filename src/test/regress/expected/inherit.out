@@ -3264,7 +3264,7 @@ explain (costs off) select min(a), max(a) from parted_minmax where b = '12345';
      ->  Limit
            ->  Index Only Scan using parted_minmax1i on parted_minmax1 parted_minmax
                  Index Cond: ((a IS NOT NULL) AND (b = '12345'::text))
-   InitPlan minmax_1
+   InitPlan minmax_2
      ->  Limit
            ->  Index Only Scan Backward using parted_minmax1i on parted_minmax1 parted_minmax_1
                  Index Cond: ((a IS NOT NULL) AND (b = '12345'::text))

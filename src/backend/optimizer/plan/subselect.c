@@ -967,8 +967,9 @@ SS_process_ctes(PlannerInfo *root)
 		 * Generate Paths for the CTE query.  Always plan for full retrieval
 		 * --- we don't have enough info to predict otherwise.
 		 */
-		subroot = subquery_planner(root->glob, subquery, cte->ctename, root,
-								   cte->cterecursive, 0.0, NULL);
+		subroot = subquery_planner(root->glob, subquery,
+								   choose_plan_name(root->glob, cte->ctename, false),
+								   root, cte->cterecursive, 0.0, NULL);
 
 		/*
 		 * Since the current query level doesn't yet contain any RTEs, it
