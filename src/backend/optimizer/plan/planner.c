@@ -331,6 +331,7 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 	glob->subplans = NIL;
 	glob->subpaths = NIL;
 	glob->subroots = NIL;
+	glob->subplanNames = NIL;
 	glob->rewindPlanIDs = NULL;
 	glob->finalrtable = NIL;
 	glob->allRelids = NULL;
@@ -8845,6 +8846,39 @@ create_partial_unique_paths(PlannerInfo *root, RelOptInfo *input_rel,
 char *
 choose_plan_name(PlannerGlobal *glob, const char *name, bool always_number)
 {
+	size_t		base_len = strlen(name);
+	int			max_suffix = always_number ? 0 : -1;
+	char	   *canon_name;
+
+	foreach_ptr(char, subplan_name, glob->subplanNames)
+	{
+		char	   *last_underscore = strrchr(subplan_name, '_');
+
+		if ((last_underscore - subplan_name) == base_len &&
+			strncmp(subplan_name, name, base_len) == 0)
+		{
+			int			suffix_num = atoi(last_underscore + 1);
+
+			if (suffix_num > max_suffix)
+				max_suffix = suffix_num;
+		}
+	}
+
+	canon_name = psprintf("%s_%u", name, max_suffix + 1);
+	glob->subplanNames = lappend(glob->subplanNames, canon_name);
+
+	return (max_suffix == -1) ? pstrdup(name) : canon_name;
+}
+
+#if 0
+/*
+ * Choose a unique name for some subroot.
+ *
+ * Modifies glob->subplanNames to track names already used.
+ */
+char *
+choose_plan_name(PlannerGlobal *glob, const char *name, bool always_number)
+{
 	unsigned	n;
 
 	/*
@@ -8903,3 +8937,4 @@ choose_plan_name(PlannerGlobal *glob, const char *name, bool always_number)
 		pfree(proposed_name);
 	}
 }
+#endif
