@@ -53,6 +53,7 @@
 #include "parser/parse_utilcmd.h"
 #include "partitioning/partdesc.h"
 #include "pgstat.h"
+#include "rewrite/rewriteHandler.h"
 #include "rewrite/rewriteManip.h"
 #include "storage/lmgr.h"
 #include "storage/proc.h"
@@ -1097,7 +1098,6 @@ DefineIndex(Oid tableId,
 		}
 	}
 
-
 	/*
 	 * We disallow indexes on system columns.  They would not necessarily get
 	 * updated correctly, and they don't seem useful anyway.
@@ -1126,13 +1126,11 @@ DefineIndex(Oid tableId,
 	}
 
 	/*
-	 * Also check for system and generated columns used in expressions or
-	 * predicates.
+	 * Also check for system columns used in expressions or predicates.
 	 */
 	if (indexInfo->ii_Expressions || indexInfo->ii_Predicate)
 	{
 		Bitmapset  *indexattrs = NULL;
-		int			j;
 
 		pull_varattnos((Node *) indexInfo->ii_Expressions, 1, &indexattrs);
 		pull_varattnos((Node *) indexInfo->ii_Predicate, 1, &indexattrs);
@@ -1145,25 +1143,19 @@ DefineIndex(Oid tableId,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						 errmsg("index creation on system columns is not supported")));
 		}
-
-		/*
-		 * XXX Virtual generated columns in index expressions or predicates
-		 * could be supported, but it needs support in
-		 * RelationGetIndexExpressions() and RelationGetIndexPredicate().
-		 */
-		j = -1;
-		while ((j = bms_next_member(indexattrs, j)) >= 0)
-		{
-			AttrNumber	attno = j + FirstLowInvalidHeapAttributeNumber;
-
-			if (TupleDescAttr(RelationGetDescr(rel), attno - 1)->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL)
-				ereport(ERROR,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 stmt->isconstraint ?
-						 errmsg("unique constraints on virtual generated columns are not supported") :
-						 errmsg("indexes on virtual generated columns are not supported")));
-		}
 	}
+
+	/*
+	 * Expand virtual generated columns in expressions or predicates.
+	 */
+	if (indexInfo->ii_Expressions)
+		indexInfo->ii_Expressions = (List *)
+			expand_generated_columns_in_expr((Node *) indexInfo->ii_Expressions,
+											 rel, 1);
+	if (indexInfo->ii_Predicate)
+		indexInfo->ii_Predicate = (List *)
+			expand_generated_columns_in_expr((Node *) indexInfo->ii_Predicate,
+											 rel, 1);
 
 	/* Is index safe for others to ignore?  See set_indexsafe_procflags() */
 	safe_index = indexInfo->ii_Expressions == NIL &&

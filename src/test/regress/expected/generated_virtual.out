@@ -741,18 +741,49 @@ ERROR:  primary keys on virtual generated columns are not supported
 -- indexes
 CREATE TABLE gtest22c (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL);
 --CREATE INDEX gtest22c_b_idx ON gtest22c (b);
---CREATE INDEX gtest22c_expr_idx ON gtest22c ((b * 3));
---CREATE INDEX gtest22c_pred_idx ON gtest22c (a) WHERE b > 0;
---\d gtest22c
---INSERT INTO gtest22c VALUES (1), (2), (3);
---SET enable_seqscan TO off;
---SET enable_bitmapscan TO off;
+CREATE INDEX gtest22c_expr_idx ON gtest22c ((b * 3));
+CREATE INDEX gtest22c_pred_idx ON gtest22c (a) WHERE b > 0;
+\d gtest22c
+               Table "generated_virtual_tests.gtest22c"
+ Column |  Type   | Collation | Nullable |           Default           
+--------+---------+-----------+----------+-----------------------------
+ a      | integer |           |          | 
+ b      | integer |           |          | generated always as (a * 2)
+Indexes:
+    "gtest22c_expr_idx" btree ((a * 2 * 3))
+    "gtest22c_pred_idx" btree (a) WHERE (a * 2) > 0
+
+INSERT INTO gtest22c VALUES (1), (2), (3);
+SET enable_seqscan TO off;
+SET enable_bitmapscan TO off;
 --EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE b = 4;
 --SELECT * FROM gtest22c WHERE b = 4;
---EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE b * 3 = 6;
---SELECT * FROM gtest22c WHERE b * 3 = 6;
---EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE a = 1 AND b > 0;
---SELECT * FROM gtest22c WHERE a = 1 AND b > 0;
+EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE b * 3 = 6;
+                   QUERY PLAN                   
+------------------------------------------------
+ Index Scan using gtest22c_expr_idx on gtest22c
+   Index Cond: (((a * 2) * 3) = 6)
+(2 rows)
+
+SELECT * FROM gtest22c WHERE b * 3 = 6;
+ a | b 
+---+---
+ 1 | 2
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE a = 1 AND b > 0;
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Index Only Scan using gtest22c_pred_idx on gtest22c
+   Index Cond: (a = 1)
+(2 rows)
+
+SELECT * FROM gtest22c WHERE a = 1 AND b > 0;
+ a | b 
+---+---
+ 1 | 2
+(1 row)
+
 --ALTER TABLE gtest22c ALTER COLUMN b SET EXPRESSION AS (a * 4);
 --ANALYZE gtest22c;
 --EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE b = 8;
@@ -761,8 +792,8 @@ CREATE TABLE gtest22c (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL);
 --SELECT * FROM gtest22c WHERE b * 3 = 12;
 --EXPLAIN (COSTS OFF) SELECT * FROM gtest22c WHERE a = 1 AND b > 0;
 --SELECT * FROM gtest22c WHERE a = 1 AND b > 0;
---RESET enable_seqscan;
---RESET enable_bitmapscan;
+RESET enable_seqscan;
+RESET enable_bitmapscan;
 -- foreign keys
 CREATE TABLE gtest23a (x int PRIMARY KEY, y int);
 --INSERT INTO gtest23a VALUES (1, 11), (2, 22), (3, 33);
