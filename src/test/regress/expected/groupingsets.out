@@ -890,7 +890,8 @@ explain (costs off)
                        ->  Seq Scan on gstest2
 (10 rows)
 
--- test pushdown of HAVING clause that does not reference any columns that are nullable by grouping sets
+-- test pushdown of non-degenerate HAVING clause that does not reference any
+-- columns that are nullable by grouping sets
 explain (costs off)
 select a, b, count(*) from gstest2 group by grouping sets ((a, b), (a)) having a > 1 and b > 1;
            QUERY PLAN            
@@ -910,6 +911,44 @@ select a, b, count(*) from gstest2 group by grouping sets ((a, b), (a)) having a
 ---+---+-------
  2 | 2 |     1
 (1 row)
+
+-- test pushdown of degenerate HAVING clause
+explain (costs off)
+select count(*) from gstest2 group by grouping sets (()) having false;
+            QUERY PLAN             
+-----------------------------------
+ Aggregate
+   Group Key: ()
+   Filter: false
+   ->  Result
+         Replaces: Scan on gstest2
+         One-Time Filter: false
+(6 rows)
+
+select count(*) from gstest2 group by grouping sets (()) having false;
+ count 
+-------
+(0 rows)
+
+explain (costs off)
+select a, count(*) from gstest2 group by grouping sets ((a), ()) having false;
+               QUERY PLAN                
+-----------------------------------------
+ GroupAggregate
+   Group Key: a
+   Group Key: ()
+   Filter: false
+   ->  Sort
+         Sort Key: a
+         ->  Result
+               Replaces: Scan on gstest2
+               One-Time Filter: false
+(9 rows)
+
+select a, count(*) from gstest2 group by grouping sets ((a), ()) having false;
+ a | count 
+---+-------
+(0 rows)
 
 -- HAVING with GROUPING queries
 select ten, grouping(ten) from onek

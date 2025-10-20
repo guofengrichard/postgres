@@ -1128,14 +1128,25 @@ subquery_planner(PlannerGlobal *glob, Query *parse, char *plan_name,
 		parse->hasTargetSRFs = expression_returns_set((Node *) parse->targetList);
 
 	/*
+	 * Expand the groupingSets tree of this Query to a flat list of grouping
+	 * sets.
+	 */
+	if (parse->groupingSets)
+	{
+		parse->groupingSets =
+			expand_grouping_sets(parse->groupingSets, parse->groupDistinct, -1);
+	}
+
+	/*
 	 * In some cases we may want to transfer a HAVING clause into WHERE. We
 	 * cannot do so if the HAVING clause contains aggregates (obviously) or
 	 * volatile functions (since a HAVING clause is supposed to be executed
-	 * only once per group).  We also can't do this if there are any nonempty
-	 * grouping sets and the clause references any columns that are nullable
-	 * by the grouping sets; moving such a clause into WHERE would potentially
-	 * change the results.  (If there are only empty grouping sets, then the
-	 * HAVING clause must be degenerate as discussed below.)
+	 * only once per group).  We also can't do this if there are any grouping
+	 * sets and the clause references any columns that are nullable by the
+	 * grouping sets; the nulled values of those columns are not available
+	 * before the grouping step.  (The test on groupClause might seem wrong,
+	 * but it's okay: it's just an optimization to avoid running pull_varnos
+	 * when there cannot be any Vars in the HAVING clause.)
 	 *
 	 * Also, it may be that the clause is so expensive to execute that we're
 	 * better off doing it only once per group, despite the loss of
@@ -1145,19 +1156,19 @@ subquery_planner(PlannerGlobal *glob, Query *parse, char *plan_name,
 	 * clause into WHERE, in hopes of eliminating tuples before aggregation
 	 * instead of after.
 	 *
-	 * If the query has explicit grouping then we can simply move such a
+	 * If the query has no empty grouping set then we can simply move such a
 	 * clause into WHERE; any group that fails the clause will not be in the
 	 * output because none of its tuples will reach the grouping or
-	 * aggregation stage.  Otherwise we must have a degenerate (variable-free)
-	 * HAVING clause, which we put in WHERE so that query_planner() can use it
-	 * in a gating Result node, but also keep in HAVING to ensure that we
-	 * don't emit a bogus aggregated row. (This could be done better, but it
-	 * seems not worth optimizing.)
+	 * aggregation stage.  Otherwise we have to keep the clause in HAVING to
+	 * ensure that we don't emit a bogus aggregated row.  But then the HAVING
+	 * clause must be degenerate (variable-free), so we can copy it into WHERE
+	 * so that query_planner() can use it in a gating Result node. (This could
+	 * be done better, but it seems not worth optimizing.)
 	 *
 	 * Note that a HAVING clause may contain expressions that are not fully
 	 * preprocessed.  This can happen if these expressions are part of
 	 * grouping items.  In such cases, they are replaced with GROUP Vars in
-	 * the parser and then replaced back after we've done with expression
+	 * the parser and then replaced back after we're done with expression
 	 * preprocessing on havingQual.  This is not an issue if the clause
 	 * remains in HAVING, because these expressions will be matched to lower
 	 * target items in setrefs.c.  However, if the clause is moved or copied
@@ -1182,7 +1193,9 @@ subquery_planner(PlannerGlobal *glob, Query *parse, char *plan_name,
 			/* keep it in HAVING */
 			newHaving = lappend(newHaving, havingclause);
 		}
-		else if (parse->groupClause)
+		else if (parse->groupClause &&
+				 (parse->groupingSets == NIL ||
+				  linitial(parse->groupingSets) != NIL))
 		{
 			Node	   *whereclause;
 
@@ -2194,8 +2207,6 @@ preprocess_grouping_sets(PlannerInfo *root)
 	int			maxref = 0;
 	ListCell   *lc_set;
 	grouping_sets_data *gd = palloc0(sizeof(grouping_sets_data));
-
-	parse->groupingSets = expand_grouping_sets(parse->groupingSets, parse->groupDistinct, -1);
 
 	gd->any_hashable = false;
 	gd->unhashable_refs = NULL;
