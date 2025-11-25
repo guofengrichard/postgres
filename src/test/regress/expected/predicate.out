@@ -284,6 +284,45 @@ SELECT * FROM pred_tab t1
          ->  Seq Scan on pred_tab t2
 (9 rows)
 
+--
+-- Tests for NullTest reduction for COALESCE expressions
+--
+-- Ensure the IS_NOT_NULL qual is ignored
+EXPLAIN (COSTS OFF)
+SELECT * FROM pred_tab WHERE COALESCE(b, 1) IS NOT NULL;
+      QUERY PLAN      
+----------------------
+ Seq Scan on pred_tab
+(1 row)
+
+-- Ensure the IS_NOT_NULL qual is ignored
+EXPLAIN (COSTS OFF)
+SELECT * FROM pred_tab WHERE COALESCE(b, a) IS NOT NULL;
+      QUERY PLAN      
+----------------------
+ Seq Scan on pred_tab
+(1 row)
+
+-- Ensure the IS_NULL qual is reduced to constant-FALSE
+EXPLAIN (COSTS OFF)
+SELECT * FROM pred_tab WHERE COALESCE(b, 1) IS NULL;
+          QUERY PLAN          
+------------------------------
+ Result
+   Replaces: Scan on pred_tab
+   One-Time Filter: false
+(3 rows)
+
+-- Ensure the IS_NULL qual is reduced to constant-FALSE
+EXPLAIN (COSTS OFF)
+SELECT * FROM pred_tab WHERE COALESCE(b, a) IS NULL;
+          QUERY PLAN          
+------------------------------
+ Result
+   Replaces: Scan on pred_tab
+   One-Time Filter: false
+(3 rows)
+
 DROP TABLE pred_tab;
 -- Validate we handle IS NULL and IS NOT NULL quals correctly with inheritance
 -- parents.

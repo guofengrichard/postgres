@@ -3572,30 +3572,27 @@ eval_const_expressions_mutator(Node *node,
 
 					return makeBoolConst(result, false);
 				}
-				if (!ntest->argisrow && arg && IsA(arg, Var) && context->root)
+				if (!ntest->argisrow && arg &&
+					expr_is_nonnullable(context->root, (Expr *) arg, false))
 				{
-					Var		   *varg = (Var *) arg;
 					bool		result;
 
-					if (var_is_nonnullable(context->root, varg, false))
+					switch (ntest->nulltesttype)
 					{
-						switch (ntest->nulltesttype)
-						{
-							case IS_NULL:
-								result = false;
-								break;
-							case IS_NOT_NULL:
-								result = true;
-								break;
-							default:
-								elog(ERROR, "unrecognized nulltesttype: %d",
-									 (int) ntest->nulltesttype);
-								result = false; /* keep compiler quiet */
-								break;
-						}
-
-						return makeBoolConst(result, false);
+						case IS_NULL:
+							result = false;
+							break;
+						case IS_NOT_NULL:
+							result = true;
+							break;
+						default:
+							elog(ERROR, "unrecognized nulltesttype: %d",
+								 (int) ntest->nulltesttype);
+							result = false; /* keep compiler quiet */
+							break;
 					}
+
+					return makeBoolConst(result, false);
 				}
 
 				newntest = makeNode(NullTest);
@@ -4330,8 +4327,8 @@ var_is_nonnullable(PlannerInfo *root, Var *var, bool use_rel_info)
  * nullability information before RelOptInfos are generated.  These should
  * pass 'use_rel_info' as false.
  *
- * For now, we only support Var and Const.  Support for other node types may
- * be possible.
+ * For now, we only support Var, Const, and CoalesceExpr.  Support for other
+ * node types may be possible.
  */
 bool
 expr_is_nonnullable(PlannerInfo *root, Expr *expr, bool use_rel_info)
@@ -4339,7 +4336,22 @@ expr_is_nonnullable(PlannerInfo *root, Expr *expr, bool use_rel_info)
 	if (IsA(expr, Var) && root)
 		return var_is_nonnullable(root, (Var *) expr, use_rel_info);
 	if (IsA(expr, Const))
-		return !castNode(Const, expr)->constisnull;
+		return !((Const *) expr)->constisnull;
+	if (IsA(expr, CoalesceExpr))
+	{
+		/*
+		 * A CoalesceExpr returns NULL if and only if all its arguments are
+		 * NULL.  Therefore, we can determine that a CoalesceExpr cannot be
+		 * NULL if at least one of its arguments can be proven non-nullable.
+		 */
+		CoalesceExpr *coalesceexpr = (CoalesceExpr *) expr;
+
+		foreach_ptr(Expr, arg, coalesceexpr->args)
+		{
+			if (expr_is_nonnullable(root, arg, use_rel_info))
+				return true;
+		}
+	}
 
 	return false;
 }
