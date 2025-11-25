@@ -1222,16 +1222,14 @@ select max(unique2), generate_series(1,3) as g from tenk1 order by g desc;
 -- interesting corner case: constant gets optimized into a seqscan
 explain (costs off)
   select max(100) from tenk1;
-                     QUERY PLAN                     
-----------------------------------------------------
+           QUERY PLAN            
+---------------------------------
  Result
    Replaces: MinMaxAggregate
    InitPlan minmax_1
      ->  Limit
-           ->  Result
-                 One-Time Filter: (100 IS NOT NULL)
-                 ->  Seq Scan on tenk1
-(7 rows)
+           ->  Seq Scan on tenk1
+(5 rows)
 
 select max(100) from tenk1;
  max 

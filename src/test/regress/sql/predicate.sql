@@ -133,6 +133,26 @@ SELECT * FROM pred_tab t1
         (SELECT 1 FROM pred_tab t3, pred_tab t4, pred_tab t5, pred_tab t6
          WHERE t1.a = t3.a AND t6.a IS NULL);
 
+--
+-- Tests for NullTest reduction for COALESCE expressions
+--
+
+-- Ensure the IS_NOT_NULL qual is ignored
+EXPLAIN (COSTS OFF)
+SELECT * FROM pred_tab WHERE COALESCE(b, 1) IS NOT NULL;
+
+-- Ensure the IS_NOT_NULL qual is ignored
+EXPLAIN (COSTS OFF)
+SELECT * FROM pred_tab WHERE COALESCE(b, a) IS NOT NULL;
+
+-- Ensure the IS_NULL qual is reduced to constant-FALSE
+EXPLAIN (COSTS OFF)
+SELECT * FROM pred_tab WHERE COALESCE(b, 1) IS NULL;
+
+-- Ensure the IS_NULL qual is reduced to constant-FALSE
+EXPLAIN (COSTS OFF)
+SELECT * FROM pred_tab WHERE COALESCE(b, a) IS NULL;
+
 DROP TABLE pred_tab;
 
 -- Validate we handle IS NULL and IS NOT NULL quals correctly with inheritance

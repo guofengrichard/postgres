@@ -131,6 +131,7 @@ static Expr *simplify_function(Oid funcid,
 							   Oid result_collid, Oid input_collid, List **args_p,
 							   bool funcvariadic, bool process_args, bool allow_non_const,
 							   eval_const_expressions_context *context);
+static bool var_is_nonnullable(PlannerInfo *root, Var *var, bool use_rel_info);
 static List *reorder_function_arguments(List *args, int pronargs,
 										HeapTuple func_tuple);
 static List *add_function_defaults(List *args, int pronargs,
@@ -3318,10 +3319,10 @@ eval_const_expressions_mutator(Node *node,
 													   context);
 
 					/*
-					 * We can remove null constants from the list. For a
-					 * non-null constant, if it has not been preceded by any
-					 * other non-null-constant expressions then it is the
-					 * result. Otherwise, it's the next argument, but we can
+					 * We can remove null constants from the list.  For a
+					 * nonnullable expression, if it has not been preceded by
+					 * any non-null-constant expressions then it is the
+					 * result.  Otherwise, it's the next argument, but we can
 					 * drop following arguments since they will never be
 					 * reached.
 					 */
@@ -3334,6 +3335,14 @@ eval_const_expressions_mutator(Node *node,
 						newargs = lappend(newargs, e);
 						break;
 					}
+					if (expr_is_nonnullable(context->root, (Expr *) e, false))
+					{
+						if (newargs == NIL)
+							return e;	/* first expr */
+						newargs = lappend(newargs, e);
+						break;
+					}
+
 					newargs = lappend(newargs, e);
 				}
 
@@ -3557,30 +3566,27 @@ eval_const_expressions_mutator(Node *node,
 
 					return makeBoolConst(result, false);
 				}
-				if (!ntest->argisrow && arg && IsA(arg, Var) && context->root)
+				if (!ntest->argisrow && arg &&
+					expr_is_nonnullable(context->root, (Expr *) arg, false))
 				{
-					Var		   *varg = (Var *) arg;
 					bool		result;
 
-					if (var_is_nonnullable(context->root, varg, false))
+					switch (ntest->nulltesttype)
 					{
-						switch (ntest->nulltesttype)
-						{
-							case IS_NULL:
-								result = false;
-								break;
-							case IS_NOT_NULL:
-								result = true;
-								break;
-							default:
-								elog(ERROR, "unrecognized nulltesttype: %d",
-									 (int) ntest->nulltesttype);
-								result = false; /* keep compiler quiet */
-								break;
-						}
-
-						return makeBoolConst(result, false);
+						case IS_NULL:
+							result = false;
+							break;
+						case IS_NOT_NULL:
+							result = true;
+							break;
+						default:
+							elog(ERROR, "unrecognized nulltesttype: %d",
+								 (int) ntest->nulltesttype);
+							result = false; /* keep compiler quiet */
+							break;
 					}
+
+					return makeBoolConst(result, false);
 				}
 
 				newntest = makeNode(NullTest);
@@ -4209,7 +4215,7 @@ simplify_function(Oid funcid, Oid result_type, int32 result_typmod,
  * use_rel_info indicates whether the corresponding RelOptInfo is available for
  * use.
  */
-bool
+static bool
 var_is_nonnullable(PlannerInfo *root, Var *var, bool use_rel_info)
 {
 	Bitmapset  *notnullattnums = NULL;
@@ -4257,6 +4263,41 @@ var_is_nonnullable(PlannerInfo *root, Var *var, bool use_rel_info)
 	if (var->varattno > 0 &&
 		bms_is_member(var->varattno, notnullattnums))
 		return true;
+
+	return false;
+}
+
+/*
+ * expr_is_nonnullable
+ *	  Check to see if the Expr cannot be NULL
+ *
+ * Currently, we only support simple expressions such as Vars, Consts, and
+ * CoalesceExprs.  Support for other node types may be added in the future.
+ *
+ * use_rel_info is interpreted the same way as in var_is_nonnullable().
+ */
+bool
+expr_is_nonnullable(PlannerInfo *root, Expr *expr, bool use_rel_info)
+{
+	if (IsA(expr, Var) && root)
+		return var_is_nonnullable(root, (Var *) expr, use_rel_info);
+	if (IsA(expr, Const))
+		return !((Const *) expr)->constisnull;
+	if (IsA(expr, CoalesceExpr))
+	{
+		/*
+		 * A CoalesceExpr returns NULL if and only if all its arguments are
+		 * NULL.  Therefore, we can determine that a CoalesceExpr cannot be
+		 * NULL if at least one of its arguments can be proven non-nullable.
+		 */
+		CoalesceExpr *coalesceexpr = (CoalesceExpr *) expr;
+
+		foreach_ptr(Expr, arg, coalesceexpr->args)
+		{
+			if (expr_is_nonnullable(root, arg, use_rel_info))
+				return true;
+		}
+	}
 
 	return false;
 }
