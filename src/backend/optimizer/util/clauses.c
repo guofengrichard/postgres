@@ -4333,24 +4333,99 @@ var_is_nonnullable(PlannerInfo *root, Var *var, bool use_rel_info)
 bool
 expr_is_nonnullable(PlannerInfo *root, Expr *expr, bool use_rel_info)
 {
-	if (IsA(expr, Var) && root)
-		return var_is_nonnullable(root, (Var *) expr, use_rel_info);
-	if (IsA(expr, Const))
-		return !((Const *) expr)->constisnull;
-	if (IsA(expr, CoalesceExpr))
+	switch (nodeTag(expr))
 	{
-		/*
-		 * A CoalesceExpr returns NULL if and only if all its arguments are
-		 * NULL.  Therefore, we can determine that a CoalesceExpr cannot be
-		 * NULL if at least one of its arguments can be proven non-nullable.
-		 */
-		CoalesceExpr *coalesceexpr = (CoalesceExpr *) expr;
+		case T_Var:
+			{
+				if (root)
+					return var_is_nonnullable(root, (Var *) expr, use_rel_info);
+			}
+			break;
+		case T_Const:
+			return !((Const *) expr)->constisnull;
+		case T_CoalesceExpr:
+			{
+				/*
+				 * A CoalesceExpr returns NULL if and only if all its
+				 * arguments are NULL.  Therefore, we can determine that a
+				 * CoalesceExpr cannot be NULL if at least one of its
+				 * arguments can be proven non-nullable.
+				 */
+				CoalesceExpr *coalesceexpr = (CoalesceExpr *) expr;
 
-		foreach_ptr(Expr, arg, coalesceexpr->args)
-		{
-			if (expr_is_nonnullable(root, arg, use_rel_info))
+				foreach_ptr(Expr, arg, coalesceexpr->args)
+				{
+					if (expr_is_nonnullable(root, arg, use_rel_info))
+						return true;
+				}
+			}
+			break;
+		case T_MinMaxExpr:
+			{
+				/*
+				 * Like CoalesceExpr, a MinMaxExpr returns NULL only if all
+				 * its arguments evaluate to NULL.
+				 */
+				MinMaxExpr *minmaxexpr = (MinMaxExpr *) expr;
+
+				foreach_ptr(Expr, arg, minmaxexpr->args)
+				{
+					if (expr_is_nonnullable(root, arg, use_rel_info))
+						return true;
+				}
+			}
+			break;
+		case T_ArrayExpr:
+			{
+				/*
+				 * An ARRAY[] expression always returns a valid Array object,
+				 * even if it is empty (ARRAY[]) or contains NULLs
+				 * (ARRAY[NULL]).  It never evaluates to a SQL NULL.
+				 */
 				return true;
-		}
+			}
+		case T_NullTest:
+			{
+				/*
+				 * An IS NULL / IS NOT NULL expression always returns a
+				 * boolean value.  It never returns SQL NULL.
+				 */
+				return true;
+			}
+		case T_BooleanTest:
+			{
+				/*
+				 * A BooleanTest expression always evaluates to a boolean
+				 * value.  It never returns SQL NULL.
+				 */
+				return true;
+			}
+		case T_CaseExpr:
+			{
+				/*
+				 * A CASE expression is non-nullable if all branch results are
+				 * non-nullable.  We must also verify that the default result
+				 * (ELSE) exists and is non-nullable.
+				 */
+				CaseExpr   *caseexpr = (CaseExpr *) expr;
+
+				/* The default result must be present and non-nullable */
+				if (caseexpr->defresult == NULL ||
+					!expr_is_nonnullable(root, caseexpr->defresult, use_rel_info))
+					return false;
+
+				/* All branch results must be non-nullable */
+				foreach_ptr(CaseWhen, casewhen, caseexpr->args)
+				{
+					if (!expr_is_nonnullable(root, casewhen->result, use_rel_info))
+						return false;
+				}
+
+				return true;
+			}
+			break;
+		default:
+			break;
 	}
 
 	return false;
