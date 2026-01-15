@@ -44,11 +44,11 @@ static bool contain_placeholder_references_walker(Node *node,
  * phrels is the syntactic location (as a set of relids) to attribute
  * to the expression.
  *
- * The caller is responsible for adjusting phlevelsup and phnullingrels
- * as needed.  Because we do not know here which query level the PHV
- * will be associated with, it's important that this function touches
- * only root->glob; messing with other parts of PlannerInfo would be
- * likely to do the wrong thing.
+ * The caller is responsible for adjusting phlevelsup, phnullingrels, and
+ * phpreserved as needed.  Because we do not know here which query level
+ * the PHV will be associated with, it's important that this function
+ * touches only root->glob; messing with other parts of PlannerInfo
+ * would be likely to do the wrong thing.
  */
 PlaceHolderVar *
 make_placeholder_expr(PlannerInfo *root, Expr *expr, Relids phrels)
@@ -58,6 +58,7 @@ make_placeholder_expr(PlannerInfo *root, Expr *expr, Relids phrels)
 	phv->phexpr = expr;
 	phv->phrels = phrels;
 	phv->phnullingrels = NULL;	/* caller may change this later */
+	phv->phpreserved = false;	/* caller may change this later */
 	phv->phid = ++(root->glob->lastPHId);
 	phv->phlevelsup = 0;		/* caller may change this later */
 
