@@ -163,6 +163,14 @@ GROUP BY t1.a ORDER BY t1.a;
 RESET geqo;
 RESET geqo_threshold;
 
+-- Ensure eager aggregation is not applied because random() is a volatile
+-- function
+EXPLAIN (COSTS OFF)
+SELECT t1.a, avg(t2.c + random())
+  FROM eager_agg_t1 t1
+  JOIN eager_agg_t2 t2 ON t1.b = t2.b
+GROUP BY t1.a ORDER BY t1.a;
+
 DROP TABLE eager_agg_t1;
 DROP TABLE eager_agg_t2;
 DROP TABLE eager_agg_t3;
