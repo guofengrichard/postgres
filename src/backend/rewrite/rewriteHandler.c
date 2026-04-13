@@ -98,7 +98,8 @@ static List *matchLocks(CmdType event, Relation relation,
 static Query *fireRIRrules(Query *parsetree, List *activeRIRs);
 static Bitmapset *adjust_view_column_set(Bitmapset *cols, List *targetlist);
 static Node *expand_generated_columns_internal(Node *node, Relation rel, int rt_index,
-											   RangeTblEntry *rte, int result_relation);
+											   RangeTblEntry *rte, int result_relation,
+											   bool include_stored);
 
 
 /*
@@ -642,11 +643,33 @@ rewriteRuleAction(Query *parsetree,
 	if ((event == CMD_INSERT || event == CMD_UPDATE) &&
 		sub_action->commandType != CMD_UTILITY)
 	{
+		RangeTblEntry *new_rte = rt_fetch(new_varno, sub_action->rtable);
+		Relation	new_rel;
+
+		/*
+		 * First, expand any generated column references in the NEW relation.
+		 * This must happen before ReplaceVarsFromTargetList, because the
+		 * query's target list won't contain entries for generated columns
+		 * (they are removed by rewriteTargetListIU).  Without this step,
+		 * ReplaceVarsFromTargetList would fall through to
+		 * REPLACEVARS_CHANGE_VARNO (for UPDATE) or
+		 * REPLACEVARS_SUBSTITUTE_NULL (for INSERT), producing wrong results
+		 * when the generated column depends on columns being modified.
+		 */
+		new_rel = relation_open(new_rte->relid, NoLock);
+		sub_action = (Query *)
+			expand_generated_columns_internal((Node *) sub_action,
+											  new_rel, new_varno,
+											  new_rte,
+											  sub_action->resultRelation,
+											  true);
+		relation_close(new_rel, NoLock);
+
 		sub_action = (Query *)
 			ReplaceVarsFromTargetList((Node *) sub_action,
 									  new_varno,
 									  0,
-									  rt_fetch(new_varno, sub_action->rtable),
+									  new_rte,
 									  parsetree->targetList,
 									  sub_action->resultRelation,
 									  (event == CMD_UPDATE) ?
@@ -2368,11 +2391,24 @@ CopyAndAddInvertedQual(Query *parsetree,
 	ChangeVarNodes(new_qual, PRS2_OLD_VARNO, rt_index, 0);
 	/* Fix references to NEW */
 	if (event == CMD_INSERT || event == CMD_UPDATE)
+	{
+		RangeTblEntry *rte = rt_fetch(rt_index, parsetree->rtable);
+		Relation	rel;
+
+		/* Expand generated column references, as in rewriteRuleAction */
+		rel = relation_open(rte->relid, NoLock);
+		new_qual = expand_generated_columns_internal(new_qual,
+													 rel,
+													 PRS2_NEW_VARNO,
+													 rte,
+													 parsetree->resultRelation,
+													 true);
+		relation_close(rel, NoLock);
+
 		new_qual = ReplaceVarsFromTargetList(new_qual,
 											 PRS2_NEW_VARNO,
 											 0,
-											 rt_fetch(rt_index,
-													  parsetree->rtable),
+											 rte,
 											 parsetree->targetList,
 											 parsetree->resultRelation,
 											 (event == CMD_UPDATE) ?
@@ -2380,6 +2416,7 @@ CopyAndAddInvertedQual(Query *parsetree,
 											 REPLACEVARS_SUBSTITUTE_NULL,
 											 rt_index,
 											 &parsetree->hasSubLinks);
+	}
 	/* And attach the fixed qual */
 	AddInvertedQual(parsetree, new_qual);
 
@@ -4530,28 +4567,38 @@ RewriteQuery(Query *parsetree, List *rewrite_events, int orig_rt_length,
 
 
 /*
- * Expand virtual generated columns
+ * Expand generated columns
  *
- * If the table contains virtual generated columns, build a target list
- * containing the expanded expressions and use ReplaceVarsFromTargetList() to
- * do the replacements.
+ * If the table contains generated columns, build a target list containing the
+ * expanded expressions and use ReplaceVarsFromTargetList() to do the
+ * replacements.
  *
  * Vars matching rt_index at the current query level are replaced by the
- * virtual generated column expressions from rel, if there are any.
+ * generated column expressions from rel, if there are any.
  *
  * The caller must also provide rte, the RTE describing the target relation,
  * in order to handle any whole-row Vars referencing the target, and
  * result_relation, the index of the result relation, if this is part of an
  * INSERT/UPDATE/DELETE/MERGE query.
+ *
+ * If include_stored is false, only virtual generated columns are expanded.
+ * If include_stored is true, both stored and virtual generated columns are
+ * expanded.  The latter is needed when expanding NEW references in rule
+ * actions, because rewriteTargetListIU removes both types from the target
+ * list, and both need to be expanded before ReplaceVarsFromTargetList can
+ * correctly resolve them.
  */
 static Node *
 expand_generated_columns_internal(Node *node, Relation rel, int rt_index,
-								  RangeTblEntry *rte, int result_relation)
+								  RangeTblEntry *rte, int result_relation,
+								  bool include_stored)
 {
 	TupleDesc	tupdesc;
 
 	tupdesc = RelationGetDescr(rel);
-	if (tupdesc->constr && tupdesc->constr->has_generated_virtual)
+	if (tupdesc->constr &&
+		(tupdesc->constr->has_generated_virtual ||
+		 (include_stored && tupdesc->constr->has_generated_stored)))
 	{
 		List	   *tlist = NIL;
 
@@ -4559,7 +4606,8 @@ expand_generated_columns_internal(Node *node, Relation rel, int rt_index,
 		{
 			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
 
-			if (attr->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL)
+			if (attr->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL ||
+				(include_stored && attr->attgenerated == ATTRIBUTE_GENERATED_STORED))
 			{
 				Node	   *defexpr;
 				TargetEntry *te;
@@ -4572,12 +4620,11 @@ expand_generated_columns_internal(Node *node, Relation rel, int rt_index,
 			}
 		}
 
-		Assert(list_length(tlist) > 0);
-
-		node = ReplaceVarsFromTargetList(node, rt_index, 0, rte, tlist,
-										 result_relation,
-										 REPLACEVARS_CHANGE_VARNO, rt_index,
-										 NULL);
+		if (tlist != NIL)
+			node = ReplaceVarsFromTargetList(node, rt_index, 0, rte, tlist,
+											 result_relation,
+											 REPLACEVARS_CHANGE_VARNO, rt_index,
+											 NULL);
 	}
 
 	return node;
@@ -4604,7 +4651,8 @@ expand_generated_columns_in_expr(Node *node, Relation rel, int rt_index)
 		rte->rtekind = RTE_RELATION;
 		rte->relid = RelationGetRelid(rel);
 
-		node = expand_generated_columns_internal(node, rel, rt_index, rte, 0);
+		node = expand_generated_columns_internal(node, rel, rt_index, rte, 0,
+												 false);
 	}
 
 	return node;
@@ -4623,8 +4671,11 @@ build_generation_expression(Relation rel, int attrno)
 	Node	   *defexpr;
 	Oid			attcollid;
 
-	Assert(rd_att->constr && rd_att->constr->has_generated_virtual);
-	Assert(att_tup->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL);
+	Assert(rd_att->constr &&
+		   (rd_att->constr->has_generated_virtual ||
+			rd_att->constr->has_generated_stored));
+	Assert(att_tup->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL ||
+		   att_tup->attgenerated == ATTRIBUTE_GENERATED_STORED);
 
 	defexpr = build_column_default(rel, attrno);
 	if (defexpr == NULL)
