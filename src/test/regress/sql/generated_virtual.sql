@@ -814,6 +814,18 @@ CREATE TABLE gtest28b (LIKE gtest28a INCLUDING GENERATED);
 
 \d gtest28*
 
+-- rule actions referring to generated columns:
+-- NEW.b in a rule action should reflect the generated column's new value
+CREATE TABLE gtest_rule (a int, b int GENERATED ALWAYS AS (a * 2) VIRTUAL);
+CREATE TABLE gtest_rule_log (op text, old_b int, new_b int);
+CREATE RULE gtest_rule_upd AS ON UPDATE TO gtest_rule
+  DO ALSO INSERT INTO gtest_rule_log VALUES ('UPD', OLD.b, NEW.b);
+CREATE RULE gtest_rule_ins AS ON INSERT TO gtest_rule
+  DO ALSO INSERT INTO gtest_rule_log VALUES ('INS', NULL, NEW.b);
+INSERT INTO gtest_rule (a) VALUES (1);
+UPDATE gtest_rule SET a = 10;
+SELECT * FROM gtest_rule_log;
+DROP TABLE gtest_rule, gtest_rule_log;
 
 -- sanity check of system catalog
 SELECT attrelid, attname, attgenerated FROM pg_attribute WHERE attgenerated NOT IN ('', 's', 'v');
