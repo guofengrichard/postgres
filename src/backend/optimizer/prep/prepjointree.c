@@ -170,9 +170,11 @@ static Node *remove_useless_results_recurse(PlannerInfo *root, Node *jtnode,
 											Relids *dropped_outer_joins);
 static int	get_result_relid(PlannerInfo *root, Node *jtnode);
 static void remove_result_refs(PlannerInfo *root, int varno, Node *newjtloc);
-static bool find_dependent_phvs(PlannerInfo *root, int varno);
+static bool find_dependent_phvs(PlannerInfo *root, int varno,
+								Relids dropped_outer_joins);
 static bool find_dependent_phvs_in_jointree(PlannerInfo *root,
-											Node *node, int varno);
+											Node *node, int varno,
+											Relids dropped_outer_joins);
 static void substitute_phv_relids(Node *node,
 								  int varno, Relids subrelids);
 static void fix_append_rel_relids(PlannerInfo *root, int varno,
@@ -3948,7 +3950,10 @@ remove_useless_result_rtes(PlannerInfo *root)
  *
  * This recursively processes the jointree and returns a modified jointree.
  * In addition, the RT indexes of any removed outer-join nodes are added to
- * *dropped_outer_joins.
+ * *dropped_outer_joins.  Besides being fixed up at the end of the pass,
+ * that set is consulted while we recurse: it lets us mask stale outer-join
+ * relids out of a PlaceHolderVar's phrels when checking whether a PHV still
+ * needs the RTE_RESULT we're considering removing.
  *
  * jtnode is the current jointree node.  If it could be valid to merge
  * its quals into those of the parent node, parent_quals should point to
@@ -4001,7 +4006,8 @@ remove_useless_results_recurse(PlannerInfo *root, Node *jtnode,
 			 */
 			if (list_length(f->fromlist) > 1 &&
 				(varno = get_result_relid(root, child)) != 0 &&
-				!find_dependent_phvs_in_jointree(root, (Node *) f, varno))
+				!find_dependent_phvs_in_jointree(root, (Node *) f, varno,
+												 *dropped_outer_joins))
 			{
 				f->fromlist = foreach_delete_current(f->fromlist, cell);
 				result_relids = bms_add_member(result_relids, varno);
@@ -4103,7 +4109,8 @@ remove_useless_results_recurse(PlannerInfo *root, Node *jtnode,
 				 * allowed to have such refs.
 				 */
 				if ((varno = get_result_relid(root, j->larg)) != 0 &&
-					!find_dependent_phvs_in_jointree(root, j->rarg, varno))
+					!find_dependent_phvs_in_jointree(root, j->rarg, varno,
+													 *dropped_outer_joins))
 				{
 					remove_result_refs(root, varno, j->rarg);
 					if (j->quals != NULL && parent_quals == NULL)
@@ -4158,7 +4165,7 @@ remove_useless_results_recurse(PlannerInfo *root, Node *jtnode,
 				 */
 				if ((varno = get_result_relid(root, j->rarg)) != 0 &&
 					(j->quals == NULL ||
-					 !find_dependent_phvs(root, varno)))
+					 !find_dependent_phvs(root, varno, *dropped_outer_joins)))
 				{
 					remove_result_refs(root, varno, j->larg);
 					*dropped_outer_joins = bms_add_member(*dropped_outer_joins,
@@ -4288,11 +4295,16 @@ remove_result_refs(PlannerInfo *root, int varno, Node *newjtloc)
  * a subtree of the join tree contains such PHVs; but for that, we have
  * to look not only at the join tree nodes themselves but at the
  * referenced RTEs.  For that, use find_dependent_phvs_in_jointree.
+ *
+ * A PHV's phrels can also contain outer-join relids.  We ignore any that
+ * refer to an already-dropped outer join (passed in dropped_outer_joins),
+ * since those are stale until phrels is fixed up at the end of the pass.
  */
 
 typedef struct
 {
 	Relids		relids;
+	Relids		dropped_outer_joins;
 	int			sublevels_up;
 } find_dependent_phvs_context;
 
@@ -4306,9 +4318,18 @@ find_dependent_phvs_walker(Node *node,
 	{
 		PlaceHolderVar *phv = (PlaceHolderVar *) node;
 
-		if (phv->phlevelsup == context->sublevels_up &&
-			bms_equal(context->relids, phv->phrels))
-			return true;
+		if (phv->phlevelsup == context->sublevels_up)
+		{
+			Relids		phrels = phv->phrels;
+
+			phrels = bms_difference(phrels, context->dropped_outer_joins);
+			if (bms_equal(context->relids, phrels))
+			{
+				bms_free(phrels);
+				return true;
+			}
+			bms_free(phrels);
+		}
 		/* fall through to examine children */
 	}
 	if (IsA(node, Query))
@@ -4332,7 +4353,7 @@ find_dependent_phvs_walker(Node *node,
 }
 
 static bool
-find_dependent_phvs(PlannerInfo *root, int varno)
+find_dependent_phvs(PlannerInfo *root, int varno, Relids dropped_outer_joins)
 {
 	find_dependent_phvs_context context;
 
@@ -4341,6 +4362,7 @@ find_dependent_phvs(PlannerInfo *root, int varno)
 		return false;
 
 	context.relids = bms_make_singleton(varno);
+	context.dropped_outer_joins = dropped_outer_joins;
 	context.sublevels_up = 0;
 
 	if (query_tree_walker(root->parse, find_dependent_phvs_walker, &context, 0))
@@ -4354,7 +4376,8 @@ find_dependent_phvs(PlannerInfo *root, int varno)
 }
 
 static bool
-find_dependent_phvs_in_jointree(PlannerInfo *root, Node *node, int varno)
+find_dependent_phvs_in_jointree(PlannerInfo *root, Node *node, int varno,
+								Relids dropped_outer_joins)
 {
 	find_dependent_phvs_context context;
 	Relids		subrelids;
@@ -4365,6 +4388,7 @@ find_dependent_phvs_in_jointree(PlannerInfo *root, Node *node, int varno)
 		return false;
 
 	context.relids = bms_make_singleton(varno);
+	context.dropped_outer_joins = dropped_outer_joins;
 	context.sublevels_up = 0;
 
 	/*
