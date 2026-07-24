@@ -20,6 +20,8 @@
  */
 #include "postgres.h"
 
+#include <limits.h>
+
 #include "optimizer/appendinfo.h"
 #include "optimizer/clauses.h"
 #include "optimizer/optimizer.h"
@@ -28,6 +30,10 @@
 #include "optimizer/paths.h"
 #include "optimizer/placeholder.h"
 #include "optimizer/planmain.h"
+#include "optimizer/tlist.h"
+
+
+static void reset_query_planner(PlannerInfo *root);
 
 
 /*
@@ -176,6 +182,12 @@ query_planner(PlannerInfo *root,
 	remove_useless_groupby_columns(root);
 
 	/*
+	 * If we successfully removed any joins, throw away all the derived data
+	 * and loop back around.
+	 */
+restart:
+
+	/*
 	 * Examine the targetlist and join tree, adding entries to baserel
 	 * targetlists for all referenced Vars, and generating PlaceHolderInfo
 	 * entries for all referenced PlaceHolderVars.  Restrict and join clauses
@@ -228,7 +240,11 @@ query_planner(PlannerInfo *root,
 	 * jointree preprocessing, but the necessary information isn't available
 	 * until we've built baserel data structures and classified qual clauses.
 	 */
-	joinlist = remove_useless_joins(root, joinlist);
+	if (remove_useless_joins(root))
+	{
+		reset_query_planner(root);
+		goto restart;
+	}
 
 	/*
 	 * Also, reduce any semijoins with unique inner rels to plain inner joins.
@@ -302,4 +318,68 @@ query_planner(PlannerInfo *root,
 		elog(ERROR, "failed to construct the join relation");
 
 	return final_rel;
+}
+
+static void
+reset_query_planner(PlannerInfo *root)
+{
+	int			i;
+
+	/* Relids sets rebuilt by deconstruct_jointree() */
+	root->all_baserels = NULL;
+	root->outer_join_rels = NULL;
+	root->all_query_rels = NULL;
+
+	/* join-order and equivalence-class */
+	root->join_domains = list_make1(makeNode(JoinDomain));
+	root->eq_classes = NIL;
+	root->ec_merging_done = false;
+	root->canon_pathkeys = NIL;
+	root->left_join_clauses = NIL;
+	root->right_join_clauses = NIL;
+	root->full_join_clauses = NIL;
+	root->join_info_list = NIL;
+
+	/* RestrictInfo serial numbers */
+	root->last_rinfo_serial = 0;
+
+	/* PlaceHolderInfos */
+	root->placeholder_list = NIL;
+	root->placeholder_array = NULL;
+	root->placeholder_array_size = 0;
+	root->placeholdersFrozen = false;
+
+	root->hasPseudoConstantQuals = false;
+
+	/* pathkeys and processed clause lists recomputed by the qp_callback */
+	root->query_pathkeys = NIL;
+	root->group_pathkeys = NIL;
+	root->num_groupby_pathkeys = 0;
+	root->window_pathkeys = NIL;
+	root->distinct_pathkeys = NIL;
+	root->sort_pathkeys = NIL;
+	root->setop_pathkeys = NIL;
+	root->processed_distinctClause = NIL;
+
+	for (i = 1; i < root->simple_rel_array_size; i++)
+	{
+		RelOptInfo *rel = root->simple_rel_array[i];
+		int			attroff;
+
+		if (rel == NULL)
+			continue;
+
+		rel->reltarget = create_empty_pathtarget();
+		for (attroff = rel->max_attr - rel->min_attr; attroff >= 0; attroff--)
+			rel->attr_needed[attroff] = NULL;
+		rel->lateral_vars = NIL;
+		rel->nulling_relids = NULL;
+		rel->baserestrictinfo = NIL;
+		rel->baserestrict_min_security = UINT_MAX;
+		rel->joininfo = NIL;
+		rel->has_eclass_joins = false;
+		rel->eclass_indexes = NULL;
+		rel->unique_for_rels = NIL;
+		rel->non_unique_for_rels = NIL;
+	}
 }

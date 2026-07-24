@@ -171,6 +171,8 @@ static Node *remove_useless_results_recurse(PlannerInfo *root, Node *jtnode,
 											Relids *dropped_outer_joins);
 static int	get_result_relid(PlannerInfo *root, Node *jtnode);
 static void remove_result_refs(PlannerInfo *root, int varno, Node *newjtloc);
+static Node *remove_leftjoin_recurse(PlannerInfo *root, Node *jtnode,
+									 int relid, int ojrelid);
 static bool find_dependent_phvs(PlannerInfo *root, int varno, Relids baserels);
 static bool find_dependent_phvs_in_jointree(PlannerInfo *root,
 											Node *node, int varno,
@@ -4298,6 +4300,82 @@ remove_result_refs(PlannerInfo *root, int varno, Node *newjtloc)
 	 * We also need to remove any PlanRowMark referencing the RTE, but we
 	 * postpone that work until we return to remove_useless_result_rtes.
 	 */
+}
+
+/*
+ * remove_leftjoin_from_jointree
+ *		Remove a provably-useless left join out of the query jointree.
+ */
+void
+remove_leftjoin_from_jointree(PlannerInfo *root, int relid, int ojrelid)
+{
+	root->parse->jointree = (FromExpr *)
+		remove_leftjoin_recurse(root, (Node *) root->parse->jointree,
+								relid, ojrelid);
+	Assert(IsA(root->parse->jointree, FromExpr));
+
+	remove_nulling_relids((Node *) root->parse,
+						  bms_make_singleton(ojrelid), NULL);
+	remove_nulling_relids((Node *) root->append_rel_list,
+						  bms_make_singleton(ojrelid), NULL);
+}
+
+/*
+ * Recursive guts of remove_leftjoin_from_jointree: find the JoinExpr whose
+ * rtindex is ojrelid and return its left input in place of the join.
+ */
+static Node *
+remove_leftjoin_recurse(PlannerInfo *root, Node *jtnode,
+						int relid, int ojrelid)
+{
+	if (jtnode == NULL)
+		return NULL;
+
+	if (IsA(jtnode, RangeTblRef))
+	{
+		/* nothing to do */
+	}
+	else if (IsA(jtnode, FromExpr))
+	{
+		FromExpr   *f = (FromExpr *) jtnode;
+		ListCell   *l;
+
+		foreach(l, f->fromlist)
+			lfirst(l) = remove_leftjoin_recurse(root, (Node *) lfirst(l),
+												relid, ojrelid);
+	}
+	else if (IsA(jtnode, JoinExpr))
+	{
+		JoinExpr   *j = (JoinExpr *) jtnode;
+
+		j->larg = remove_leftjoin_recurse(root, j->larg, relid, ojrelid);
+		j->rarg = remove_leftjoin_recurse(root, j->rarg, relid, ojrelid);
+
+		if (j->rtindex == ojrelid)
+		{
+			Assert(j->jointype == JOIN_LEFT);
+
+			/* Fix up PlaceHolderVars as needed */
+			if (root->glob->lastPHId != 0)
+			{
+				Relids		subrelids;
+
+				subrelids = get_relids_in_jointree(j->larg, true, false);
+				Assert(!bms_is_empty(subrelids));
+				substitute_phv_relids((Node *) root->parse, relid, subrelids);
+				substitute_phv_relids((Node *) root->parse, ojrelid, subrelids);
+				fix_append_rel_relids(root, relid, subrelids);
+				fix_append_rel_relids(root, ojrelid, subrelids);
+			}
+
+			/* Replace the join with its left input */
+			return j->larg;
+		}
+	}
+	else
+		elog(ERROR, "unrecognized node type: %d", (int) nodeTag(jtnode));
+
+	return jtnode;
 }
 
 
