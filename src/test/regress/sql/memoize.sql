@@ -218,6 +218,27 @@ WHERE unique1 < 3
 	INNER JOIN tenk1 t2 ON t1.unique1 = t2.hundred
 	WHERE t0.ten = t1.twenty AND t0.two <> t2.four OFFSET 0);
 
+-- Exercise Memoize cache flushing when a parameter that is buried inside a
+-- larger cache-key expression also appears in a qual that is not part of the
+-- cache key.
+
+-- Ensure we get a Memoize plan with a composite cache key
+EXPLAIN (COSTS OFF)
+SELECT sum(c) FROM (
+  SELECT t0.unique1,
+    (SELECT count(*) FROM tenk1 t2
+       INNER JOIN tenk1 t1 ON t1.unique1 = t2.hundred + t0.ten
+     WHERE t1.twenty = t0.ten) AS c
+  FROM tenk1 t0 WHERE t0.unique1 < 2) s;
+
+-- Ensure the above query returns the correct result
+SELECT sum(c) FROM (
+  SELECT t0.unique1,
+    (SELECT count(*) FROM tenk1 t2
+       INNER JOIN tenk1 t1 ON t1.unique1 = t2.hundred + t0.ten
+     WHERE t1.twenty = t0.ten) AS c
+  FROM tenk1 t0 WHERE t0.unique1 < 2) s;
+
 RESET enable_seqscan;
 RESET enable_material;
 RESET enable_mergejoin;

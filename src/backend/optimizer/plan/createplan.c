@@ -1718,6 +1718,8 @@ create_memoize_plan(PlannerInfo *root, MemoizePath *best_path, int flags)
 {
 	Memoize    *plan;
 	Bitmapset  *keyparamids;
+	Bitmapset  *otherparamids;
+	RelOptInfo *rel = best_path->subpath->parent;
 	Plan	   *subplan;
 	Oid		   *operators;
 	Oid		   *collations;
@@ -1750,6 +1752,40 @@ create_memoize_plan(PlannerInfo *root, MemoizePath *best_path, int flags)
 	}
 
 	keyparamids = pull_paramids((Expr *) param_exprs);
+
+	/*
+	 * ExecReScanMemoize() skips purging the cache when only cache-key
+	 * parameters change, which is safe only if a parameter's effect on the
+	 * subplan is fully captured by the cache key.  That's not so for a
+	 * parameter buried in a larger cache-key expression that also appears
+	 * elsewhere in the subplan, since two parameter combinations can then
+	 * share a cache-key value yet yield different results.  Remove any such
+	 * parameter from keyparamids so its change forces a purge.  The Memoize
+	 * node sits atop a single relation's scan, so it suffices to check that
+	 * relation's restriction clauses and targetlist.  A parameter that is
+	 * itself a complete cache key is exempt.
+	 */
+	otherparamids = NULL;
+	foreach(lc, rel->baserestrictinfo)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
+
+		otherparamids = bms_add_members(otherparamids,
+										pull_paramids(rinfo->clause));
+	}
+	otherparamids = bms_add_members(otherparamids,
+									pull_paramids((Expr *) rel->reltarget->exprs));
+
+	foreach(lc, param_exprs)
+	{
+		Node	   *param_expr = (Node *) lfirst(lc);
+
+		if (IsA(param_expr, Param))
+			otherparamids = bms_del_member(otherparamids,
+										   ((Param *) param_expr)->paramid);
+	}
+
+	keyparamids = bms_del_members(keyparamids, otherparamids);
 
 	plan = make_memoize(subplan, operators, collations, param_exprs,
 						best_path->singlerow, best_path->binary_mode,

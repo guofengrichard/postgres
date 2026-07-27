@@ -2332,8 +2332,9 @@ typedef struct MemoizeState
 								 * by bit, false when using hash equality ops */
 	MemoizeInstrumentation stats;	/* execution statistics */
 	SharedMemoizeInfo *shared_info; /* statistics for parallel workers */
-	Bitmapset  *keyparamids;	/* Param->paramids of expressions belonging to
-								 * param_exprs */
+	Bitmapset  *keyparamids;	/* copy of Memoize.keyparamids; a change to
+								 * any param not in this set forces a cache
+								 * purge in ExecReScanMemoize() */
 } MemoizeState;
 
 /* ----------------

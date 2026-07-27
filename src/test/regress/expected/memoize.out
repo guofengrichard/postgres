@@ -455,6 +455,46 @@ WHERE unique1 < 3
        2
 (1 row)
 
+-- Exercise Memoize cache flushing when a parameter that is buried inside a
+-- larger cache-key expression also appears in a qual that is not part of the
+-- cache key.
+-- Ensure we get a Memoize plan with a composite cache key
+EXPLAIN (COSTS OFF)
+SELECT sum(c) FROM (
+  SELECT t0.unique1,
+    (SELECT count(*) FROM tenk1 t2
+       INNER JOIN tenk1 t1 ON t1.unique1 = t2.hundred + t0.ten
+     WHERE t1.twenty = t0.ten) AS c
+  FROM tenk1 t0 WHERE t0.unique1 < 2) s;
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Aggregate
+   ->  Index Scan using tenk1_unique1 on tenk1 t0
+         Index Cond: (unique1 < 2)
+   SubPlan expr_1
+     ->  Aggregate
+           ->  Nested Loop
+                 ->  Index Only Scan using tenk1_hundred on tenk1 t2
+                 ->  Memoize
+                       Cache Key: (t2.hundred + t0.ten)
+                       Cache Mode: logical
+                       ->  Index Scan using tenk1_unique1 on tenk1 t1
+                             Index Cond: (unique1 = (t2.hundred + t0.ten))
+                             Filter: (twenty = t0.ten)
+(13 rows)
+
+-- Ensure the above query returns the correct result
+SELECT sum(c) FROM (
+  SELECT t0.unique1,
+    (SELECT count(*) FROM tenk1 t2
+       INNER JOIN tenk1 t1 ON t1.unique1 = t2.hundred + t0.ten
+     WHERE t1.twenty = t0.ten) AS c
+  FROM tenk1 t0 WHERE t0.unique1 < 2) s;
+ sum  
+------
+ 1000
+(1 row)
+
 RESET enable_seqscan;
 RESET enable_material;
 RESET enable_mergejoin;

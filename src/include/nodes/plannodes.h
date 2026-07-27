@@ -1124,7 +1124,10 @@ typedef struct Memoize
 	 */
 	uint32		est_entries;
 
-	/* paramids from param_exprs */
+	/*
+	 * Paramids from param_exprs, minus any that also affect the subplan
+	 * outside the cache keys.  See create_memoize_plan().
+	 */
 	Bitmapset  *keyparamids;
 
 	/* Estimated number of rescans, for EXPLAIN */
