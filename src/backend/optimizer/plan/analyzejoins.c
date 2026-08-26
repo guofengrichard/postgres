@@ -62,8 +62,7 @@ bool		enable_self_join_elimination;
 static bool join_is_removable(PlannerInfo *root, SpecialJoinInfo *sjinfo);
 static Node *remove_join_from_jointree(Node *jtnode, int ojrelid,
 									   int *nremoved);
-static void remove_rels_from_query_tree(PlannerInfo *root,
-										Relids removed_relids);
+static void remove_rels_from_phvs(PlannerInfo *root, Relids removed_relids);
 static bool reduce_semijoin_in_jointree(Node *jtnode, Relids syn_righthand);
 static bool rel_supports_distinctness(PlannerInfo *root, RelOptInfo *rel);
 static bool rel_is_distinct_for(PlannerInfo *root, RelOptInfo *rel,
@@ -155,6 +154,10 @@ remove_useless_outer_joins(PlannerInfo *root)
 		removed_relids = bms_add_member(removed_relids, innerrelid);
 		removed_relids = bms_add_member(removed_relids, sjinfo->ojrelid);
 
+		/* As in pull_up_simple_subquery, discard a no-longer-needed subquery */
+		if (root->simple_rte_array[innerrelid]->rtekind == RTE_SUBQUERY)
+			root->simple_rte_array[innerrelid]->subquery = NULL;
+
 		/*
 		 * It's okay to keep scanning join_info_list for more removable joins,
 		 * even though the data that join_is_removable consults is now
@@ -173,8 +176,8 @@ remove_useless_outer_joins(PlannerInfo *root)
 	if (bms_is_empty(removed_relids))
 		return false;
 
-	/* Clean up the traces that the removed rels have left elsewhere */
-	remove_rels_from_query_tree(root, removed_relids);
+	/* PlaceHolderVars may still mention the removed relids in their phrels */
+	remove_rels_from_phvs(root, removed_relids);
 
 	return true;
 }
@@ -408,37 +411,42 @@ remove_join_from_jointree(Node *jtnode, int ojrelid, int *nremoved)
 }
 
 /*
- * remove_rels_from_query_tree
- *		Delete all remaining references to the given relids from the query.
+ * remove_rels_from_phvs
+ *		Strip the given relids out of all PlaceHolderVars in the query.
  *
- * Having removed some relations and outer joins from the jointree, we must
- * get rid of any references to them that are left behind elsewhere.  There
- * should be no ordinary Vars of a removed relation left, but the relids can
- * still appear in the nullingrels sets of surviving Vars and PlaceHolderVars,
- * and in the phrels sets of PlaceHolderVars.  ChangeVarNodes knows how to
- * strip a relid out of all of those.
+ * join_is_removable ensures that no Var of a removed rel survives, nor any
+ * Var or PlaceHolderVar nulled by a removed outer join.  What can survive is
+ * a PlaceHolderVar whose phrels includes the removed relids even though its
+ * expression doesn't reference them, so just strip them from phrels.
  */
 static void
-remove_rels_from_query_tree(PlannerInfo *root, Relids removed_relids)
+remove_rels_from_phvs(PlannerInfo *root, Relids removed_relids)
 {
 	int			relid = -1;
 
+	/* If there are no PHVs anywhere, we needn't work hard */
+	if (root->glob->lastPHId == 0)
+		return;
+
 	while ((relid = bms_next_member(removed_relids, relid)) >= 0)
 	{
-		/* Pass -1 for new_index to get the removal behavior */
-		ChangeVarNodes((Node *) root->parse, relid, -1, 0);
+		/* Pass NULL for subrelids to get the removal behavior */
+		substitute_phv_relids((Node *) root->parse, relid, NULL);
 
 		/*
 		 * processed_tlist shares some but not all of its nodes with
-		 * parse->targetList, so it has to be processed separately.  (That's
-		 * harmless: ChangeVarNodes works in-place, and removing a relid that
-		 * isn't there is idempotent.)
+		 * parse->targetList, so it has to be processed separately.
 		 */
-		ChangeVarNodes((Node *) root->processed_tlist, relid, -1, 0);
+		substitute_phv_relids((Node *) root->processed_tlist, relid, NULL);
 
 		/* There could be references in the append_rel_list, too */
-		if (root->append_rel_list != NIL)
-			ChangeVarNodes((Node *) root->append_rel_list, relid, -1, 0);
+		foreach_node(AppendRelInfo, appinfo, root->append_rel_list)
+		{
+			Assert(appinfo->parent_relid != relid);
+			Assert(appinfo->child_relid != relid);
+			substitute_phv_relids((Node *) appinfo->translated_vars,
+								  relid, NULL);
+		}
 	}
 }
 

@@ -181,8 +181,6 @@ static bool find_dependent_phvs(PlannerInfo *root, int varno, Relids baserels);
 static bool find_dependent_phvs_in_jointree(PlannerInfo *root,
 											Node *node, int varno,
 											Relids baserels);
-static void substitute_phv_relids(Node *node,
-								  int varno, Relids subrelids);
 static void fix_append_rel_relids(PlannerInfo *root, int varno,
 								  Relids subrelids);
 static Node *find_jointree_node_for_rel(Node *jtnode, int relid);
@@ -4580,10 +4578,11 @@ find_dependent_phvs_in_jointree(PlannerInfo *root, Node *node, int varno,
 
 /*
  * substitute_phv_relids - adjust PlaceHolderVar relid sets after pulling up
- * a subquery or removing an RTE_RESULT jointree item
+ * a subquery or removing a jointree item
  *
  * Find any PlaceHolderVar nodes in the given tree that reference the
  * pulled-up relid, and change them to reference the replacement relid(s).
+ * If subrelids is empty, the relid is simply deleted.
  *
  * NOTE: although this has the form of a walker, we cheat and modify the
  * nodes in-place.  This should be OK since the tree was copied by
@@ -4641,7 +4640,7 @@ substitute_phv_relids_walker(Node *node,
 	return expression_tree_walker(node, substitute_phv_relids_walker, context);
 }
 
-static void
+void
 substitute_phv_relids(Node *node, int varno, Relids subrelids)
 {
 	substitute_phv_relids_context context;

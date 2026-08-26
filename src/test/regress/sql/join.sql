@@ -2712,6 +2712,13 @@ SELECT q.val FROM b LEFT JOIN (
   ON true
 ) AS q ON true;
 
+-- removing a LATERAL subquery can make the rel it references removable too
+explain (costs off)
+select d.* from d
+  left join a on d.a = a.id
+  left join lateral (select count(*) as cnt from c where c.id = a.b_id) s
+    on true;
+
 CREATE TEMP TABLE parted_b (id int PRIMARY KEY) partition by range(id);
 CREATE TEMP TABLE parted_b1 partition of parted_b for values from (0) to (10);
 
