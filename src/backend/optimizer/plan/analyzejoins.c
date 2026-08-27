@@ -118,6 +118,7 @@ remove_useless_outer_joins(PlannerInfo *root)
 		SpecialJoinInfo *sjinfo = (SpecialJoinInfo *) lfirst(lc);
 		int			innerrelid;
 		int			nremoved;
+		RangeTblEntry *rte;
 
 		/* Skip if not removable */
 		if (!join_is_removable(root, sjinfo))
@@ -131,13 +132,11 @@ remove_useless_outer_joins(PlannerInfo *root)
 		innerrelid = bms_singleton_member(sjinfo->syn_righthand);
 
 		/*
-		 * The removed rel had better not be one that the rest of the planner
-		 * expects to find.  It can't be, really: a result relation or a
-		 * row-marked relation has junk columns in the query targetlist, and
+		 * The removed rel had better not be row-marked.  It can't be, really:
+		 * a row-marked relation has junk columns in the query targetlist, and
 		 * join_is_removable would have seen those as uses of the rel from
 		 * "relation 0".  But let's check.
 		 */
-		Assert(innerrelid != root->parse->resultRelation);
 #ifdef USE_ASSERT_CHECKING
 		foreach_node(PlanRowMark, rc, root->rowMarks)
 			Assert(rc->rti != innerrelid && rc->prti != innerrelid);
@@ -159,12 +158,15 @@ remove_useless_outer_joins(PlannerInfo *root)
 		 * As in pull_up_simple_subquery, discard no-longer-needed subqueries.
 		 * This is not just an optimization, but is necessary to prevent
 		 * subsequent processing from descending into stale subtrees and
-		 * seeing inconsistent data.  (Although simple_rte_array[] will be
-		 * rebuilt shortly, we can still use it to access the correct RTE in
-		 * the parse tree.)
+		 * seeing inconsistent data.  Likewise discard any securityQuals,
+		 * which contain Vars of the removed rel.  (Although
+		 * simple_rte_array[] will be rebuilt shortly, we can still use it to
+		 * access the correct RTE in the parse tree.)
 		 */
-		if (root->simple_rte_array[innerrelid]->rtekind == RTE_SUBQUERY)
-			root->simple_rte_array[innerrelid]->subquery = NULL;
+		rte = root->simple_rte_array[innerrelid];
+		if (rte->rtekind == RTE_SUBQUERY)
+			rte->subquery = NULL;
+		rte->securityQuals = NIL;
 
 		/*
 		 * It's okay to keep scanning join_info_list for more removable joins,
@@ -488,8 +490,13 @@ reduce_unique_semijoins(PlannerInfo *root)
 		if (sjinfo->jointype != JOIN_SEMI)
 			continue;
 
-		if (!bms_get_singleton_member(sjinfo->min_righthand, &innerrelid))
+		/*
+		 * We test the syntactic righthand side, since that's what identifies
+		 * the JoinExpr we'll modify.
+		 */
+		if (!bms_get_singleton_member(sjinfo->syn_righthand, &innerrelid))
 			continue;
+		Assert(bms_equal(sjinfo->min_righthand, sjinfo->syn_righthand));
 
 		innerrel = find_base_rel(root, innerrelid);
 

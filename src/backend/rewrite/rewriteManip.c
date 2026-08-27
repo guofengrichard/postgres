@@ -534,8 +534,9 @@ OffsetVarNodes(Node *node, int offset, int sublevels_up)
  * RangeTblRef and JoinExpr.
  *
  * Also, new_index can be INVALID_VAR to indicate that we are deleting the
- * given relid from the tree.  In this case we should only find rt_index
- * in nullingrels sets, never in any varno field.
+ * given relid from the tree.  In this case we expect to find rt_index only
+ * in Relids fields (varnullingrels, phnullingrels, phrels), never in any
+ * field that identifies a single relation.
  *
  * NOTE: although this has the form of a walker, we cheat and modify the
  * nodes in-place.  The given expression tree should have been copied
