@@ -146,6 +146,7 @@ typedef struct
 
 /* Local functions */
 static Node *preprocess_expression(PlannerInfo *root, Node *expr, int kind);
+static void preprocess_subquery_phvs(PlannerInfo *root, Query *subquery);
 static void preprocess_qual_conditions(PlannerInfo *root, Node *jtnode);
 static Bitmapset *find_having_conflicts(Query *parse, Index group_rtindex);
 static Oid	having_var_grouping_eqop(Var *var, void *context);
@@ -1151,6 +1152,17 @@ subquery_planner(PlannerGlobal *glob, Query *parse, char *plan_name,
 				rte->subquery = (Query *)
 					flatten_join_alias_vars(root, root->parse,
 											(Node *) rte->subquery);
+
+			/*
+			 * Likewise, any PlaceHolderVars of our level that were pushed
+			 * into the subquery have to be preprocessed now, so that they
+			 * match the preprocessed PHVs of this level.  Otherwise, a Var
+			 * that preprocessing simplifies away at this level could remain
+			 * in the subquery, and join removal could later delete that Var's
+			 * rel.
+			 */
+			if (rte->lateral && root->glob->lastPHId != 0)
+				preprocess_subquery_phvs(root, rte->subquery);
 		}
 		else if (rte->rtekind == RTE_FUNCTION)
 		{
@@ -1645,20 +1657,43 @@ group_var_eqop(Query *parse, Var *var)
 }
 
 /*
- * preprocess_phv_expression
- *	  Do preprocessing on a PlaceHolderVar expression that's been pulled up.
+ * preprocess_subquery_phvs
+ *		Preprocess the expressions of PlaceHolderVars of the current query
+ *		level that appear within a LATERAL subquery.
  *
  * If a LATERAL subquery references an output of another subquery, and that
  * output must be wrapped in a PlaceHolderVar because of an intermediate outer
- * join, then we'll push the PlaceHolderVar expression down into the subquery
- * and later pull it back up during find_lateral_references, which runs after
- * subquery_planner has preprocessed all the expressions that were in the
- * current query level to start with.  So we need to preprocess it then.
+ * join, then we'll push the PlaceHolderVar expression down into the subquery.
+ * Planning of the subquery won't preprocess it, since it belongs to our
+ * level, so we do that here.  We modify the PHVs in place.  This has to
+ * handle PHVs at any depth of sub-subqueries, so we temporarily adjust the
+ * expression's level to ours.
  */
-Expr *
-preprocess_phv_expression(PlannerInfo *root, Expr *expr)
+static void
+preprocess_subquery_phvs(PlannerInfo *root, Query *subquery)
 {
-	return (Expr *) preprocess_expression(root, (Node *) expr, EXPRKIND_PHV);
+	List	   *vars = pull_vars_of_level((Node *) subquery, 1);
+
+	foreach_ptr(Node, node, vars)
+	{
+		PlaceHolderVar *phv;
+		int			levelsup;
+		Node	   *expr;
+
+		if (!IsA(node, PlaceHolderVar))
+			continue;
+
+		phv = (PlaceHolderVar *) node;
+		levelsup = phv->phlevelsup;
+
+		/* Adjust the expression to our level, preprocess it, and adjust back */
+		expr = copyObject((Node *) phv->phexpr);
+		IncrementVarSublevelsUp(expr, -levelsup, 0);
+		expr = preprocess_expression(root, expr, EXPRKIND_PHV);
+		IncrementVarSublevelsUp(expr, levelsup, 0);
+
+		phv->phexpr = (Expr *) expr;
+	}
 }
 
 /*--------------------

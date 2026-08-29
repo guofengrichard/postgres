@@ -933,7 +933,15 @@ flatten_join_alias_vars_mutator(Node *node,
 	if (IsA(node, PlaceHolderVar))
 	{
 		/* Copy the PlaceHolderVar node with correct mutation of subnodes */
-		PlaceHolderVar *phv;
+		PlaceHolderVar *phv = (PlaceHolderVar *) node;
+
+		/*
+		 * A PHV of an upper query level can't contain join aliases of the
+		 * target level, and its expression may have been preprocessed by that
+		 * level already, so leave it alone.
+		 */
+		if (phv->phlevelsup > context->sublevels_up)
+			return node;		/* no need to copy, really */
 
 		phv = (PlaceHolderVar *) expression_tree_mutator(node,
 														 flatten_join_alias_vars_mutator,
