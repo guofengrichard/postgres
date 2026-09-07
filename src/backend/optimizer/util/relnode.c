@@ -1422,6 +1422,22 @@ build_joinrel_tlist(PlannerInfo *root, RelOptInfo *joinrel,
 	joinrel->reltarget->width = clamp_width_est(tuple_width);
 }
 
+#ifdef USE_ASSERT_CHECKING
+static bool
+no_duplicate_clause_serials(List *clauses)
+{
+	Bitmapset  *serials = NULL;
+
+	foreach_node(RestrictInfo, rinfo, clauses)
+	{
+		if (bms_is_member(rinfo->rinfo_serial, serials))
+			return false;
+		serials = bms_add_member(serials, rinfo->rinfo_serial);
+	}
+	return true;
+}
+#endif
+
 /*
  * build_joinrel_restrictlist
  * build_joinrel_joinlist
@@ -1498,6 +1514,8 @@ build_joinrel_restrictlist(PlannerInfo *root,
 														  outer_rel->relids,
 														  inner_rel,
 														  sjinfo));
+
+	Assert(no_duplicate_clause_serials(result));
 
 	return result;
 }
@@ -1797,6 +1815,8 @@ get_baserel_parampathinfo(PlannerInfo *root, RelOptInfo *baserel,
 #endif
 	pclauses = list_concat(pclauses, eqclauses);
 
+	Assert(no_duplicate_clause_serials(pclauses));
+
 	/* Compute set of serial numbers of the enforced clauses */
 	pserials = NULL;
 	foreach(lc, pclauses)
@@ -2011,6 +2031,8 @@ get_joinrel_parampathinfo(PlannerInfo *root, RelOptInfo *joinrel,
 	 * the original list structure of restrict_clauses undamaged.
 	 */
 	*restrict_clauses = list_concat(pclauses, *restrict_clauses);
+
+	Assert(no_duplicate_clause_serials(*restrict_clauses));
 
 	/* If we already have a PPI for this parameterization, just return it */
 	if ((ppi = find_param_path_info(joinrel, required_outer)))
