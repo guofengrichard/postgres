@@ -1465,6 +1465,7 @@ pull_up_simple_subquery(PlannerInfo *root, Node *jtnode, RangeTblEntry *rte,
 	subroot->append_rel_list = NIL;
 	subroot->row_identity_vars = NIL;
 	subroot->rowMarks = NIL;
+	subroot->join_alias_phvs = NIL;
 	memset(subroot->upper_rels, 0, sizeof(subroot->upper_rels));
 	memset(subroot->upper_targets, 0, sizeof(subroot->upper_targets));
 	subroot->processed_groupClause = NIL;
