@@ -9788,6 +9788,132 @@ select * from generate_series(100,200) g,
  123 | 4567890123456789 |              123
 (3 rows)
 
+-- lateral UNION ALL referencing a join alias Var that needs a PHV; the
+-- appendrel parent and children must share the PHV
+-- Here the Var is a whole-row reference to a nullable join.
+explain (verbose, costs off)
+select ss.j from
+  int4_tbl a left join (int4_tbl b cross join int4_tbl c) j on true,
+  lateral ((select j offset 0) union all select null) ss;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Nested Loop
+   Output: ((ROW(b.f1, c.f1)))
+   ->  Nested Loop Left Join
+         Output: (ROW(b.f1, c.f1))
+         ->  Seq Scan on public.int4_tbl a
+               Output: a.f1
+         ->  Materialize
+               Output: (ROW(b.f1, c.f1))
+               ->  Nested Loop
+                     Output: ROW(b.f1, c.f1)
+                     ->  Seq Scan on public.int4_tbl b
+                           Output: b.f1
+                     ->  Materialize
+                           Output: c.f1
+                           ->  Seq Scan on public.int4_tbl c
+                                 Output: c.f1
+   ->  Append
+         ->  Result
+               Output: (ROW(b.f1, c.f1))
+         ->  Result
+               Output: NULL::record
+(21 rows)
+
+explain (verbose, costs off)
+select ss.j from
+  int4_tbl a left join (int4_tbl b cross join int4_tbl c) j on true,
+  lateral (select j union all select null) ss;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Nested Loop
+   Output: ((ROW(b.f1, c.f1)))
+   ->  Nested Loop Left Join
+         Output: (ROW(b.f1, c.f1))
+         ->  Seq Scan on public.int4_tbl a
+               Output: a.f1
+         ->  Materialize
+               Output: (ROW(b.f1, c.f1))
+               ->  Nested Loop
+                     Output: ROW(b.f1, c.f1)
+                     ->  Seq Scan on public.int4_tbl b
+                           Output: b.f1
+                     ->  Materialize
+                           Output: c.f1
+                           ->  Seq Scan on public.int4_tbl c
+                                 Output: c.f1
+   ->  Append
+         ->  Result
+               Output: (ROW(b.f1, c.f1))
+         ->  Result
+               Output: NULL::record
+(21 rows)
+
+-- Here the Var is a merged column of a full join with a non-Var input
+explain (verbose, costs off)
+select ss.c from
+  int4_tbl a left join
+  ((select f1 + 0 as c from int4_tbl) s full join int4_tbl b(c) using (c)) j
+  on true,
+  lateral ((select j.c offset 0) union all select 1) ss;
+                          QUERY PLAN                          
+--------------------------------------------------------------
+ Nested Loop
+   Output: ((COALESCE((int4_tbl.f1 + 0), b.c)))
+   ->  Nested Loop Left Join
+         Output: (COALESCE((int4_tbl.f1 + 0), b.c))
+         ->  Seq Scan on public.int4_tbl a
+               Output: a.f1
+         ->  Materialize
+               Output: (COALESCE((int4_tbl.f1 + 0), b.c))
+               ->  Hash Full Join
+                     Output: COALESCE((int4_tbl.f1 + 0), b.c)
+                     Hash Cond: ((int4_tbl.f1 + 0) = b.c)
+                     ->  Seq Scan on public.int4_tbl
+                           Output: int4_tbl.f1
+                     ->  Hash
+                           Output: b.c
+                           ->  Seq Scan on public.int4_tbl b
+                                 Output: b.c
+   ->  Append
+         ->  Result
+               Output: (COALESCE((int4_tbl.f1 + 0), b.c))
+         ->  Result
+               Output: 1
+(22 rows)
+
+explain (verbose, costs off)
+select ss.c from
+  int4_tbl a left join
+  ((select f1 + 0 as c from int4_tbl) s full join int4_tbl b(c) using (c)) j
+  on true,
+  lateral (select j.c union all select 1) ss;
+                          QUERY PLAN                          
+--------------------------------------------------------------
+ Nested Loop
+   Output: ((COALESCE((int4_tbl.f1 + 0), b.c)))
+   ->  Nested Loop Left Join
+         Output: (COALESCE((int4_tbl.f1 + 0), b.c))
+         ->  Seq Scan on public.int4_tbl a
+               Output: a.f1
+         ->  Materialize
+               Output: (COALESCE((int4_tbl.f1 + 0), b.c))
+               ->  Hash Full Join
+                     Output: COALESCE((int4_tbl.f1 + 0), b.c)
+                     Hash Cond: ((int4_tbl.f1 + 0) = b.c)
+                     ->  Seq Scan on public.int4_tbl
+                           Output: int4_tbl.f1
+                     ->  Hash
+                           Output: b.c
+                           ->  Seq Scan on public.int4_tbl b
+                                 Output: b.c
+   ->  Append
+         ->  Result
+               Output: (COALESCE((int4_tbl.f1 + 0), b.c))
+         ->  Result
+               Output: 1
+(22 rows)
+
 -- lateral with VALUES
 explain (costs off)
   select count(*) from tenk1 a,

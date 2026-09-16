@@ -1775,6 +1775,19 @@ pull_up_simple_union_all(PlannerInfo *root, Node *jtnode, RangeTblEntry *rte)
 	List	   *rtable;
 
 	/*
+	 * If the subquery is LATERAL, expand any join alias Vars of the parent
+	 * query now, before copying its rtable, so that all copies share the PHVs
+	 * the expansion may create.  find_lateral_references relies on the
+	 * children matching the parent RTE's subquery.  Expanding them this early
+	 * is OK: a LATERAL item can reference only FROM items to its left, which
+	 * pull_up_subqueries has already processed, so their join alias lists are
+	 * final.
+	 */
+	if (rte->lateral)
+		rte->subquery = subquery = (Query *)
+			flatten_join_alias_vars(root, root->parse, (Node *) subquery);
+
+	/*
 	 * Make a modifiable copy of the subquery's rtable, so we can adjust
 	 * upper-level Vars in it.  There are no such Vars in the setOperations
 	 * tree proper, so fixing the rtable should be sufficient.

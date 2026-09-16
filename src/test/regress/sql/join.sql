@@ -3847,6 +3847,31 @@ select * from generate_series(100,200) g,
   lateral (select * from int8_tbl a where g = q1 union all
            select * from int8_tbl b where g = q2) ss;
 
+-- lateral UNION ALL referencing a join alias Var that needs a PHV; the
+-- appendrel parent and children must share the PHV
+-- Here the Var is a whole-row reference to a nullable join.
+explain (verbose, costs off)
+select ss.j from
+  int4_tbl a left join (int4_tbl b cross join int4_tbl c) j on true,
+  lateral ((select j offset 0) union all select null) ss;
+explain (verbose, costs off)
+select ss.j from
+  int4_tbl a left join (int4_tbl b cross join int4_tbl c) j on true,
+  lateral (select j union all select null) ss;
+-- Here the Var is a merged column of a full join with a non-Var input
+explain (verbose, costs off)
+select ss.c from
+  int4_tbl a left join
+  ((select f1 + 0 as c from int4_tbl) s full join int4_tbl b(c) using (c)) j
+  on true,
+  lateral ((select j.c offset 0) union all select 1) ss;
+explain (verbose, costs off)
+select ss.c from
+  int4_tbl a left join
+  ((select f1 + 0 as c from int4_tbl) s full join int4_tbl b(c) using (c)) j
+  on true,
+  lateral (select j.c union all select 1) ss;
+
 -- lateral with VALUES
 explain (costs off)
   select count(*) from tenk1 a,
