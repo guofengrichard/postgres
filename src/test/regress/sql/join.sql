@@ -4090,6 +4090,24 @@ select * from
              on z.q2 = ss.v)
     on y.q1 = 1;
 
+-- check that a clause the UNION ALL members cannot enforce is not dropped
+-- from the join above as already enforced, even through a Materialize
+explain (costs off)
+select t1.f1 from int4_tbl t1 where t1.f1 in
+  (select s.v + t1.f1 from
+     (select q1 - 123 as v from int8_tbl where q2 < t1.f1
+      union all
+      select q1 - 123 from int8_tbl where q2 < t1.f1) s,
+   int4_tbl t3)
+order by 1;
+select t1.f1 from int4_tbl t1 where t1.f1 in
+  (select s.v + t1.f1 from
+     (select q1 - 123 as v from int8_tbl where q2 < t1.f1
+      union all
+      select q1 - 123 from int8_tbl where q2 < t1.f1) s,
+   int4_tbl t3)
+order by 1;
+
 -- lateral can result in join conditions appearing below their
 -- real semantic level
 explain (verbose, costs off)

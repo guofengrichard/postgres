@@ -2244,6 +2244,47 @@ get_param_path_clause_serials(Path *path)
 	}
 	else
 	{
+		Path	   *subpath;
+
+		/*
+		 * A path that merely wraps another path enforces no clauses of its
+		 * own, so look through it.  We can't just use its ppi_serials: that
+		 * describes a baserel scan, and if the wrapped path is an Append,
+		 * what it enforces depends on its children, as computed above.
+		 */
+		switch (nodeTag(path))
+		{
+			case T_MaterialPath:
+				subpath = ((MaterialPath *) path)->subpath;
+				break;
+			case T_MemoizePath:
+				subpath = ((MemoizePath *) path)->subpath;
+				break;
+			case T_ProjectionPath:
+				subpath = ((ProjectionPath *) path)->subpath;
+				break;
+			case T_SortPath:
+				subpath = ((SortPath *) path)->subpath;
+				break;
+			case T_IncrementalSortPath:
+				subpath = ((IncrementalSortPath *) path)->spath.subpath;
+				break;
+			case T_UniquePath:
+				subpath = ((UniquePath *) path)->subpath;
+				break;
+			case T_AggPath:
+				subpath = ((AggPath *) path)->subpath;
+				break;
+			case T_GroupingSetsPath:
+				subpath = ((GroupingSetsPath *) path)->subpath;
+				break;
+			default:
+				subpath = NULL;
+				break;
+		}
+		if (subpath != NULL)
+			return get_param_path_clause_serials(subpath);
+
 		/*
 		 * Otherwise, it's a baserel path and we can use the
 		 * previously-computed set of serial numbers.

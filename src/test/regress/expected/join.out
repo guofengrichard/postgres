@@ -10744,6 +10744,46 @@ select * from
  4567890123456789 | -4567890123456789 | 4567890123456789 | -4567890123456789 |    |    |  
 (25 rows)
 
+-- check that a clause the UNION ALL members cannot enforce is not dropped
+-- from the join above as already enforced, even through a Materialize
+explain (costs off)
+select t1.f1 from int4_tbl t1 where t1.f1 in
+  (select s.v + t1.f1 from
+     (select q1 - 123 as v from int8_tbl where q2 < t1.f1
+      union all
+      select q1 - 123 from int8_tbl where q2 < t1.f1) s,
+   int4_tbl t3)
+order by 1;
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ Sort
+   Sort Key: t1.f1
+   ->  Nested Loop Semi Join
+         Join Filter: (t1.f1 = (((int8_tbl.q1 - 123)) + t1.f1))
+         ->  Seq Scan on int4_tbl t1
+         ->  Nested Loop
+               ->  Seq Scan on int4_tbl t3
+               ->  Materialize
+                     ->  Append
+                           ->  Seq Scan on int8_tbl
+                                 Filter: (q2 < t1.f1)
+                           ->  Seq Scan on int8_tbl int8_tbl_1
+                                 Filter: (q2 < t1.f1)
+(13 rows)
+
+select t1.f1 from int4_tbl t1 where t1.f1 in
+  (select s.v + t1.f1 from
+     (select q1 - 123 as v from int8_tbl where q2 < t1.f1
+      union all
+      select q1 - 123 from int8_tbl where q2 < t1.f1) s,
+   int4_tbl t3)
+order by 1;
+     f1     
+------------
+     123456
+ 2147483647
+(2 rows)
+
 -- lateral can result in join conditions appearing below their
 -- real semantic level
 explain (verbose, costs off)

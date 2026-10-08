@@ -1913,7 +1913,10 @@ typedef struct PathTarget
  * ppi_serials is the set of rinfo_serial numbers for quals that are enforced
  * by this path.  As with ppi_clauses, it's only maintained for baserels.
  * (We could construct it on-the-fly from ppi_clauses, but it seems better
- * to materialize a copy.)
+ * to materialize a copy.)  For an appendrel it describes a scan of the
+ * parent; what an Append path enforces depends on its children, so callers
+ * should go through get_param_path_clause_serials() rather than use it
+ * directly.
  */
 typedef struct ParamPathInfo
 {
