@@ -3192,6 +3192,15 @@ typedef struct PlaceHolderVar
  * 3 and are in the RHS of this join (so, this is the upper join in the second
  * form of the identity).
  *
+ * max_righthand is the set of rels that can end up within this join's RHS:
+ * syn_righthand plus the RHS of any upper outer join that identity 3 can move
+ * into it.  required_rels is the set of base+OJ relids that must be joined
+ * together before this join can be formed.  These are derived from the above
+ * fields once all SpecialJoinInfos exist (see compute_outer_join_extents),
+ * and are used by join_is_legal to check lateral references.  They are NULL
+ * for full joins and semijoins, and for all joins if the query has no
+ * lateral references.  They are not translated for child joins.
+ *
  * lhs_strict is true if the special join's condition cannot succeed when the
  * LHS variables are all NULL (this means that an outer join can commute with
  * upper-level outer joins even if it appears in their RHS).  We don't bother
@@ -3232,6 +3241,8 @@ typedef struct SpecialJoinInfo
 	Relids		commute_above_r;	/* commuting OJs above this one, if RHS */
 	Relids		commute_below_l;	/* commuting OJs in this one's LHS */
 	Relids		commute_below_r;	/* commuting OJs in this one's RHS */
+	Relids		max_righthand;	/* rels that can end up within the RHS */
+	Relids		required_rels;	/* relids needed before it can be formed */
 	bool		lhs_strict;		/* joinclause is strict for some LHS rel */
 	/* Remaining fields are set only for JOIN_SEMI jointype: */
 	bool		semi_can_btree; /* true if semi_operators are all btree */

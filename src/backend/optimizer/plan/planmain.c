@@ -319,6 +319,12 @@ restart:
 	create_lateral_join_info(root);
 
 	/*
+	 * Now that join_info_list is complete, fill in the SpecialJoinInfo fields
+	 * that join_is_legal() needs to check lateral references.
+	 */
+	compute_outer_join_extents(root);
+
+	/*
 	 * Match foreign keys to equivalence classes and join quals.  This must be
 	 * done after finalizing equivalence classes, and it's useful to wait till
 	 * after join removal so that we can skip processing foreign keys

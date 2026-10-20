@@ -112,6 +112,7 @@ extern void add_paths_to_joinrel(PlannerInfo *root, RelOptInfo *joinrel,
 extern void join_search_one_level(PlannerInfo *root, int level);
 extern RelOptInfo *make_join_rel(PlannerInfo *root,
 								 RelOptInfo *rel1, RelOptInfo *rel2);
+extern void compute_outer_join_extents(PlannerInfo *root);
 extern Relids add_outer_joins_to_relids(PlannerInfo *root, Relids input_relids,
 										SpecialJoinInfo *sjinfo,
 										List **pushed_down_joins);

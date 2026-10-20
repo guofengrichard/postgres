@@ -32,6 +32,12 @@ static void make_rels_by_clause_joins(PlannerInfo *root,
 static void make_rels_by_clauseless_joins(PlannerInfo *root,
 										  RelOptInfo *old_rel,
 										  List *other_rels);
+static bool needs_outer_join_output(PlannerInfo *root, RelOptInfo *rel,
+									Relids join_plus_rhs);
+static Relids outer_join_max_righthand(PlannerInfo *root,
+									   SpecialJoinInfo *ojinfo);
+static Relids outer_join_required_rels(PlannerInfo *root,
+									   SpecialJoinInfo *ojinfo);
 static bool has_join_restriction(PlannerInfo *root, RelOptInfo *rel);
 static bool has_legal_joinclause(PlannerInfo *root, RelOptInfo *rel);
 static bool restriction_is_constant_false(List *restrictlist,
@@ -601,18 +607,33 @@ join_is_legal(PlannerInfo *root, RelOptInfo *rel1, RelOptInfo *rel2,
 		/*
 		 * LATERAL references could also cause problems later on if we accept
 		 * this join: if the join's minimum parameterization includes any rels
-		 * that would have to be on the inside of an outer join with this join
-		 * rel, then it's never going to be possible to build the complete
-		 * query using this join.  We should reject this join not only because
-		 * it'll save work, but because if we don't, the clauseless-join
-		 * heuristics might think that legality of this join means that some
-		 * other join rel need not be formed, and that could lead to failure
-		 * to find any plan at all.  We have to consider not only rels that
-		 * are directly on the inner side of an OJ with the joinrel, but also
-		 * ones that are indirectly so, so search to find all such rels.
-		 * Likewise, input rels of the current join search that laterally
-		 * reference the joinrel or any rel found so far cannot supply a
-		 * parameter to the joinrel, so include those too.
+		 * that would have to join into this join rel's own join tree, then
+		 * it's never going to be possible to build the complete query using
+		 * this join.  We should reject this join not only because it'll save
+		 * work, but because if we don't, the clauseless-join heuristics might
+		 * think that legality of this join means that some other join rel
+		 * need not be formed, and that could lead to failure to find any plan
+		 * at all.  We have to consider not only rels that are directly forced
+		 * into the joinrel's tree, but also ones that are indirectly so, so
+		 * search to find all such rels, starting from the joinrel's own rels
+		 * and applying these rules until no more rels can be added:
+		 *
+		 * 1. An outer join that cannot be formed without some rel found so
+		 * far cannot be formed strictly outside the joinrel, so its output
+		 * cannot be supplied to the joinrel either: include its relid.
+		 *
+		 * 2. Rels that would have to be on the inside of an outer join with
+		 * the joinrel cannot supply a parameter to it: include the RHS of any
+		 * outer join whose LHS includes a rel found so far.  Likewise include
+		 * the RHS of an outer join whose relid was found so far, unless the
+		 * joinrel itself can be within that RHS, in which case the RHS rels
+		 * can still supply a parameter to it.
+		 *
+		 * 3. Input rels of the current join search that laterally reference
+		 * the joinrel or any rel found so far cannot supply a parameter to
+		 * the joinrel, so include those too.  The same goes for input rels
+		 * that need the output of an outer join found so far, because they
+		 * laterally reference its RHS from above it.
 		 */
 		join_lateral_rels = min_join_parameterization(root, joinrelids,
 													  rel1, rel2);
@@ -632,8 +653,29 @@ join_is_legal(PlannerInfo *root, RelOptInfo *rel1, RelOptInfo *rel2,
 					if (sjinfo->jointype == JOIN_FULL)
 						continue;
 
-					if (bms_overlap(sjinfo->min_lefthand, join_plus_rhs) &&
-						!bms_is_subset(sjinfo->min_righthand, join_plus_rhs))
+					/*
+					 * An outer join that needs any rel found so far cannot be
+					 * formed strictly outside the joinrel, so include its
+					 * relid.
+					 */
+					if (!bms_is_member(sjinfo->ojrelid, join_plus_rhs) &&
+						bms_overlap(sjinfo->required_rels, join_plus_rhs))
+					{
+						join_plus_rhs = bms_add_member(join_plus_rhs,
+													   sjinfo->ojrelid);
+						more = true;
+					}
+
+					/*
+					 * The RHS of a join whose LHS overlaps the set must be in
+					 * it too.  So must the RHS of an outer join whose relid
+					 * is in the set, unless the joinrel itself can be within
+					 * that RHS.
+					 */
+					if (!bms_is_subset(sjinfo->min_righthand, join_plus_rhs) &&
+						(bms_overlap(sjinfo->min_lefthand, join_plus_rhs) ||
+						 (bms_is_member(sjinfo->ojrelid, join_plus_rhs) &&
+						  !bms_overlap(joinrelids, sjinfo->max_righthand))))
 					{
 						join_plus_rhs = bms_add_members(join_plus_rhs,
 														sjinfo->min_righthand);
@@ -643,15 +685,18 @@ join_is_legal(PlannerInfo *root, RelOptInfo *rel1, RelOptInfo *rel2,
 
 				/*
 				 * Add input rels that laterally reference any rel found so
-				 * far.  An input rel can be a sub-joinlist's joinrel, which
-				 * must be taken as a whole.
+				 * far, or that need the output of an outer join found so far.
+				 * An input rel can be a sub-joinlist's joinrel, which must be
+				 * taken as a whole.
 				 */
 				foreach(l, root->initial_rels)
 				{
 					RelOptInfo *irel = (RelOptInfo *) lfirst(l);
 
-					if (bms_overlap(irel->lateral_relids, join_plus_rhs) &&
-						!bms_is_subset(irel->relids, join_plus_rhs))
+					if (bms_is_subset(irel->relids, join_plus_rhs))
+						continue;
+					if (bms_overlap(irel->lateral_relids, join_plus_rhs) ||
+						needs_outer_join_output(root, irel, join_plus_rhs))
 					{
 						join_plus_rhs = bms_add_members(join_plus_rhs,
 														irel->relids);
@@ -661,32 +706,6 @@ join_is_legal(PlannerInfo *root, RelOptInfo *rel1, RelOptInfo *rel2,
 			} while (more);
 			if (bms_overlap(join_plus_rhs, join_lateral_rels))
 				return false;	/* will not be able to join to some RHS rel */
-
-			/*
-			 * Furthermore, the minimum parameterization can include
-			 * outer-join relids as well as baserel relids.  In such a case
-			 * the value laterally needed is an output of that outer join, so
-			 * the outer join must be formed strictly outside this join for
-			 * the value to be supplied to it.  That's not possible if any rel
-			 * needed to form the outer join is within join_plus_rhs, since
-			 * all such rels must join into this join's own join tree.  If we
-			 * accepted this join anyway, every path for it would require a
-			 * parameter that can never be supplied, so it could never appear
-			 * in a complete plan.
-			 */
-			if (bms_overlap(join_lateral_rels, root->outer_join_rels))
-			{
-				foreach(l, root->join_info_list)
-				{
-					SpecialJoinInfo *sjinfo = (SpecialJoinInfo *) lfirst(l);
-
-					if (!bms_is_member(sjinfo->ojrelid, join_lateral_rels))
-						continue;
-					if (bms_overlap(join_plus_rhs, sjinfo->min_lefthand) ||
-						bms_overlap(join_plus_rhs, sjinfo->min_righthand))
-						return false;	/* OJ can't be formed outside join */
-				}
-			}
 		}
 	}
 
@@ -694,6 +713,181 @@ join_is_legal(PlannerInfo *root, RelOptInfo *rel1, RelOptInfo *rel2,
 	*sjinfo_p = match_sjinfo;
 	*reversed_p = reversed;
 	return true;
+}
+
+/*
+ * needs_outer_join_output
+ *	  Does rel laterally need the output of an outer join whose relid is in
+ *	  join_plus_rhs?
+ *
+ * max_righthand is the set of rels that can end up within an outer join's
+ * RHS.  If rel is outside that set but laterally references a rel within it,
+ * rel must be joined above the outer join: if the referenced rel does end up
+ * within the RHS, rel sees its values as nulled by the outer join; and if it
+ * ends up above the outer join instead, rel depends on it and so must be
+ * above the outer join too.
+ */
+static bool
+needs_outer_join_output(PlannerInfo *root, RelOptInfo *rel,
+						Relids join_plus_rhs)
+{
+	ListCell   *l;
+
+	if (rel->lateral_relids == NULL)
+		return false;
+
+	foreach(l, root->join_info_list)
+	{
+		SpecialJoinInfo *sjinfo = (SpecialJoinInfo *) lfirst(l);
+
+		if (sjinfo->max_righthand == NULL)
+			continue;			/* full join or semijoin */
+		if (bms_is_member(sjinfo->ojrelid, join_plus_rhs) &&
+			bms_overlap(rel->lateral_relids, sjinfo->max_righthand) &&
+			!bms_overlap(rel->relids, sjinfo->max_righthand))
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * compute_outer_join_extents
+ *	  Fill the max_righthand and required_rels fields of the SpecialJoinInfos
+ *	  in root->join_info_list.
+ *
+ * These are derived from the other SpecialJoinInfo fields, so this must be
+ * called once join_info_list is complete.  join_is_legal() uses them to check
+ * lateral references, so there is nothing to do if the query has none.  Full
+ * joins and semijoins are left with NULL fields.
+ */
+void
+compute_outer_join_extents(PlannerInfo *root)
+{
+	ListCell   *l;
+
+	if (!root->hasLateralRTEs)
+		return;
+
+	/* max_righthand must be known for all joins before required_rels */
+	foreach(l, root->join_info_list)
+	{
+		SpecialJoinInfo *sjinfo = (SpecialJoinInfo *) lfirst(l);
+
+		if (sjinfo->jointype == JOIN_FULL || sjinfo->ojrelid == 0)
+			continue;
+		sjinfo->max_righthand = outer_join_max_righthand(root, sjinfo);
+	}
+
+	foreach(l, root->join_info_list)
+	{
+		SpecialJoinInfo *sjinfo = (SpecialJoinInfo *) lfirst(l);
+
+		if (sjinfo->max_righthand == NULL)
+			continue;
+		sjinfo->required_rels = outer_join_required_rels(root, sjinfo);
+	}
+}
+
+/*
+ * outer_join_max_righthand
+ *	  Compute the rels that can end up within the RHS of the given outer join.
+ *
+ * Besides the join's syntactic RHS, this includes the RHS of any outer join
+ * that identity 3 can move into it, and so on recursively.  commute_above_l
+ * can claim commutability for an upper join whose min_lefthand includes rels
+ * from above the lower join, but such a join cannot be formed within the
+ * lower join's RHS, so we only count joins whose min_lefthand lies within
+ * the rels found so far.
+ */
+static Relids
+outer_join_max_righthand(PlannerInfo *root, SpecialJoinInfo *ojinfo)
+{
+	Relids		result = bms_copy(ojinfo->syn_righthand);
+	Relids		commuters = bms_copy(ojinfo->commute_above_l);
+	bool		more;
+
+	/* fast path for the common case of nothing to move in */
+	if (commuters == NULL)
+		return result;
+
+	do
+	{
+		ListCell   *l;
+
+		more = false;
+		foreach(l, root->join_info_list)
+		{
+			SpecialJoinInfo *sjinfo = (SpecialJoinInfo *) lfirst(l);
+
+			if (!bms_is_member(sjinfo->ojrelid, commuters) ||
+				!bms_is_subset(sjinfo->min_lefthand, result))
+				continue;
+			if (!bms_is_subset(sjinfo->syn_righthand, result))
+			{
+				result = bms_add_members(result, sjinfo->syn_righthand);
+				more = true;
+			}
+			if (!bms_is_subset(sjinfo->commute_above_l, commuters))
+			{
+				commuters = bms_add_members(commuters,
+											sjinfo->commute_above_l);
+				more = true;
+			}
+		}
+	} while (more);
+
+	return result;
+}
+
+/*
+ * outer_join_required_rels
+ *	  Compute the relids that must be joined together before the given outer
+ *	  join can be formed.
+ *
+ * These are the join's min_lefthand and min_righthand, plus the inputs of
+ * any lower outer join whose relid they include, and of any lower outer
+ * join they span: one that has a min_righthand rel in the set together with
+ * a rel that cannot be within its RHS, since those two can only be joined
+ * once that outer join has been formed.  max_righthand must already be set
+ * for every outer join.
+ */
+static Relids
+outer_join_required_rels(PlannerInfo *root, SpecialJoinInfo *ojinfo)
+{
+	Relids		result;
+	bool		more;
+
+	result = bms_union(ojinfo->min_lefthand, ojinfo->min_righthand);
+	do
+	{
+		ListCell   *l;
+
+		more = false;
+		foreach(l, root->join_info_list)
+		{
+			SpecialJoinInfo *sjinfo = (SpecialJoinInfo *) lfirst(l);
+
+			if (sjinfo == ojinfo || sjinfo->max_righthand == NULL)
+				continue;
+			if (bms_is_member(sjinfo->ojrelid, result))
+			{
+				/* included already; make sure its inputs are too */
+				if (bms_is_subset(sjinfo->min_lefthand, result) &&
+					bms_is_subset(sjinfo->min_righthand, result))
+					continue;
+			}
+			else if (!bms_overlap(result, sjinfo->min_righthand) ||
+					 bms_is_subset(result, sjinfo->max_righthand))
+				continue;		/* not spanned */
+			result = bms_add_member(result, sjinfo->ojrelid);
+			result = bms_add_members(result, sjinfo->min_lefthand);
+			result = bms_add_members(result, sjinfo->min_righthand);
+			more = true;
+		}
+	} while (more);
+
+	return result;
 }
 
 /*
@@ -722,6 +916,8 @@ init_dummy_sjinfo(SpecialJoinInfo *sjinfo, Relids left_relids,
 	sjinfo->commute_above_r = NULL;
 	sjinfo->commute_below_l = NULL;
 	sjinfo->commute_below_r = NULL;
+	sjinfo->max_righthand = NULL;
+	sjinfo->required_rels = NULL;
 	/* we don't bother trying to make the remaining fields valid */
 	sjinfo->lhs_strict = false;
 	sjinfo->semi_can_btree = false;

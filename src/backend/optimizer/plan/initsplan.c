@@ -2091,6 +2091,9 @@ make_outerjoininfo(PlannerInfo *root,
 	sjinfo->commute_above_r = NULL;
 	sjinfo->commute_below_l = NULL;
 	sjinfo->commute_below_r = NULL;
+	/* these fields are filled in by compute_outer_join_extents(): */
+	sjinfo->max_righthand = NULL;
+	sjinfo->required_rels = NULL;
 
 	compute_semijoin_info(root, sjinfo, clause);
 

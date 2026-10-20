@@ -2588,6 +2588,98 @@ where s2.q2 > t1.f1;
 reset from_collapse_limit;
 
 --
+-- check that a join is disallowed when its lateral reference can only be
+-- satisfied by way of a rel that needs the output of an outer join that has
+-- to be formed above the join
+--
+
+explain (costs off)
+select count(*) from int4_tbl t1 left join (int4_tbl t2 cross join int4_tbl t3) on true
+  cross join lateral (select t3.f1 offset 0) s1
+  left join lateral (select s1.f1 offset 0) s2 on t2.f1 = 1;
+
+select count(*) from int4_tbl t1 left join (int4_tbl t2 cross join int4_tbl t3) on true
+  cross join lateral (select t3.f1 offset 0) s1
+  left join lateral (select s1.f1 offset 0) s2 on t2.f1 = 1;
+
+-- likewise when the rel is reached through an outer join
+explain (costs off)
+select count(*) from int4_tbl t1 left join (int4_tbl t2 cross join int4_tbl t3) on true
+  cross join lateral (select t3.f1 offset 0) s1
+  left join int4_tbl t4 on s1.f1 = t4.f1
+  left join lateral (select t4.f1 offset 0) s2 on t2.f1 = 1;
+
+select count(*) from int4_tbl t1 left join (int4_tbl t2 cross join int4_tbl t3) on true
+  cross join lateral (select t3.f1 offset 0) s1
+  left join int4_tbl t4 on s1.f1 = t4.f1
+  left join lateral (select t4.f1 offset 0) s2 on t2.f1 = 1;
+
+-- likewise when the rel shares an outer join's RHS with such a rel
+explain (costs off)
+select count(*) from int8_tbl t1 left join (int8_tbl t2 cross join int8_tbl t3) on true
+  cross join lateral (select t3.q1 as k offset 0) s1
+  left join (int8_tbl t4 cross join lateral (select s1.k offset 0) s2) on t2.q1 = t4.q1
+  left join lateral (select t4.q2 offset 0) s3 on t3.q2 = s3.q2;
+
+select count(*) from int8_tbl t1 left join (int8_tbl t2 cross join int8_tbl t3) on true
+  cross join lateral (select t3.q1 as k offset 0) s1
+  left join (int8_tbl t4 cross join lateral (select s1.k offset 0) s2) on t2.q1 = t4.q1
+  left join lateral (select t4.q2 offset 0) s3 on t3.q2 = s3.q2;
+
+-- likewise when the rel is in the RHS of an outer join whose LHS includes
+-- the lower outer join
+explain (costs off)
+select count(*) from int8_tbl t1 left join (int8_tbl t2 cross join int8_tbl t3) on true
+  left join (int8_tbl t4 cross join lateral (select coalesce(t1.q1, 0) as k) s1) on t3.q2 = s1.k
+  left join lateral (select s1.k offset 0) s2 on t2.q2 = s2.k;
+
+select count(*) from int8_tbl t1 left join (int8_tbl t2 cross join int8_tbl t3) on true
+  left join (int8_tbl t4 cross join lateral (select coalesce(t1.q1, 0) as k) s1) on t3.q2 = s1.k
+  left join lateral (select s1.k offset 0) s2 on t2.q2 = s2.k;
+
+-- likewise when the outer join's LHS spans the lower outer join's RHS and a
+-- rel outside it, so that it must be formed above the lower outer join
+explain (costs off)
+select count(*) from int8_tbl t1 left join (int8_tbl t2 cross join int8_tbl t3) on true
+  cross join int8_tbl t4
+  left join int8_tbl t5 on t2.q2 = t5.q1 and t4.q1 = t5.q2
+  left join lateral (select t5.q2 offset 0) s2 on t3.q2 = s2.q2;
+
+select count(*) from int8_tbl t1 left join (int8_tbl t2 cross join int8_tbl t3) on true
+  cross join int8_tbl t4
+  left join int8_tbl t5 on t2.q2 = t5.q1 and t4.q1 = t5.q2
+  left join lateral (select t5.q2 offset 0) s2 on t3.q2 = s2.q2;
+
+-- likewise when the referenced rel is in the RHS of an outer join that
+-- identity 3 can move into the lower outer join's RHS
+explain (costs off)
+select count(*) from int8_tbl t1 left join (int8_tbl t2 cross join int8_tbl t3) on true
+  left join lateral (select t1.q1 as k offset 0) s1 on t3.q1 = 1
+  cross join lateral (select s1.k offset 0) s2
+  cross join int8_tbl t4
+  inner join int8_tbl t5 on s2.k = t5.q2
+  left join lateral (select s2.k offset 0) s3 on t2.q1 = 1;
+
+select count(*) from int8_tbl t1 left join (int8_tbl t2 cross join int8_tbl t3) on true
+  left join lateral (select t1.q1 as k offset 0) s1 on t3.q1 = 1
+  cross join lateral (select s1.k offset 0) s2
+  cross join int8_tbl t4
+  inner join int8_tbl t5 on s2.k = t5.q2
+  left join lateral (select s2.k offset 0) s3 on t2.q1 = 1;
+
+-- but a rel that identity 3 can move into the RHS can still supply a parameter
+explain (costs off)
+select count(*) from int8_tbl t1 left join (int8_tbl t2 cross join int8_tbl t3) on true
+  left join lateral (select t2.q2 as k offset 0) s1 on t2.q1 = s1.k
+  left join (lateral (select coalesce(s1.k, 0) as k) s2 left join int8_tbl t4 on s2.k = 1) on t3.q2 = t4.q2
+  left join lateral (select t4.q1 offset 0) s3 on s1.k = s3.q1;
+
+select count(*) from int8_tbl t1 left join (int8_tbl t2 cross join int8_tbl t3) on true
+  left join lateral (select t2.q2 as k offset 0) s1 on t2.q1 = s1.k
+  left join (lateral (select coalesce(s1.k, 0) as k) s2 left join int8_tbl t4 on s2.k = 1) on t3.q2 = t4.q2
+  left join lateral (select t4.q1 offset 0) s3 on s1.k = s3.q1;
+
+--
 -- check that an outer join is not taken to commute with a lower outer join
 -- when its clause references the lower join's RHS only laterally within a
 -- PlaceHolderVar
