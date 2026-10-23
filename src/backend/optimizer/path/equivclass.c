@@ -75,6 +75,8 @@ static RestrictInfo *create_join_clause(PlannerInfo *root,
 										EquivalenceMember *leftem,
 										EquivalenceMember *rightem,
 										EquivalenceClass *parent_ec);
+static bool outer_join_clause_still_needed(PlannerInfo *root,
+										   OuterJoinClauseInfo *ojcinfo);
 static bool reconsider_outer_join_clause(PlannerInfo *root,
 										 OuterJoinClauseInfo *ojcinfo,
 										 bool outer_on_left);
@@ -2155,7 +2157,8 @@ create_join_clause(PlannerInfo *root,
  * seen as a clauseless join and avoided during join order searching.
  * We handle this by generating a constant-TRUE clause that is marked with
  * the same required_relids etc as the removed outer-join clause, thus
- * making it a join clause between the correct relations.
+ * making it a join clause between the correct relations.  (But see
+ * outer_join_clause_still_needed for a case where it is not redundant.)
  */
 void
 reconsider_outer_join_clauses(PlannerInfo *root)
@@ -2181,6 +2184,15 @@ reconsider_outer_join_clauses(PlannerInfo *root)
 				/* remove it from the list */
 				root->left_join_clauses =
 					foreach_delete_current(root->left_join_clauses, cell);
+				/* keep the clause if it's still needed (see notes above) */
+				if (outer_join_clause_still_needed(root, ojcinfo))
+				{
+					/* but the kept clause has no extra selectivity */
+					rinfo->norm_selec = 1.0;
+					rinfo->outer_selec = 1.0;
+					distribute_restrictinfo_to_rels(root, rinfo);
+					continue;
+				}
 				/* throw back a dummy replacement clause (see notes above) */
 				rinfo = make_restrictinfo(root,
 										  (Expr *) makeBoolConst(true, false),
@@ -2209,6 +2221,15 @@ reconsider_outer_join_clauses(PlannerInfo *root)
 				/* remove it from the list */
 				root->right_join_clauses =
 					foreach_delete_current(root->right_join_clauses, cell);
+				/* keep the clause if it's still needed (see notes above) */
+				if (outer_join_clause_still_needed(root, ojcinfo))
+				{
+					/* but the kept clause has no extra selectivity */
+					rinfo->norm_selec = 1.0;
+					rinfo->outer_selec = 1.0;
+					distribute_restrictinfo_to_rels(root, rinfo);
+					continue;
+				}
 				/* throw back a dummy replacement clause (see notes above) */
 				rinfo = make_restrictinfo(root,
 										  (Expr *) makeBoolConst(true, false),
@@ -2272,6 +2293,38 @@ reconsider_outer_join_clauses(PlannerInfo *root)
 
 		distribute_restrictinfo_to_rels(root, ojcinfo->rinfo);
 	}
+}
+
+/*
+ * outer_join_clause_still_needed
+ *	  Is an outer-join clause still needed even though we have derived
+ *	  INNERVAR = CONSTANT from it?
+ *
+ * It is if it may be applied where OUTERVAR has gone to NULL, which happens
+ * for a clone lacking the nulling bit of a commuting outer join (one of its
+ * incompatible_relids) whose relid can be withheld from the joinrel (nonempty
+ * commute_below_l; see add_outer_joins_to_relids).
+ */
+static bool
+outer_join_clause_still_needed(PlannerInfo *root, OuterJoinClauseInfo *ojcinfo)
+{
+	RestrictInfo *rinfo = ojcinfo->rinfo;
+	ListCell   *lc;
+
+	if (!rinfo->has_clone && !rinfo->is_clone)
+		return false;
+
+	foreach(lc, root->join_info_list)
+	{
+		SpecialJoinInfo *othersj = (SpecialJoinInfo *) lfirst(lc);
+
+		if (othersj != ojcinfo->sjinfo &&
+			bms_is_member(othersj->ojrelid, rinfo->incompatible_relids) &&
+			!bms_is_empty(othersj->commute_below_l))
+			return true;
+	}
+
+	return false;
 }
 
 /*
