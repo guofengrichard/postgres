@@ -137,6 +137,13 @@ SELECT * FROM J1_TBL a1 JOIN J2_TBL a2 USING (i) AS a1;  -- error
 SELECT x.* FROM J1_TBL JOIN J2_TBL USING (i) AS x WHERE J1_TBL.t = 'one';
 SELECT ROW(x.*) FROM J1_TBL JOIN J2_TBL USING (i) AS x WHERE J1_TBL.t = 'one';
 SELECT row_to_json(x.*) FROM J1_TBL JOIN J2_TBL USING (i) AS x WHERE J1_TBL.t = 'one';
+-- whole-row reference to a join using alias below an outer join
+SELECT t1.i, t1.t FROM J1_TBL t1
+  LEFT JOIN (J1_TBL JOIN J2_TBL USING (i) AS x) ON t1.i = x.i
+  WHERE x IS NULL ORDER BY 1, 2;
+SELECT count(*) FROM J1_TBL t1
+  LEFT JOIN (J1_TBL JOIN J2_TBL USING (i) AS x) ON true
+  LEFT JOIN J2_TBL t2 ON x IS NULL;
 
 --
 -- NATURAL JOIN

@@ -1673,6 +1673,28 @@ SELECT row_to_json(x.*) FROM J1_TBL JOIN J2_TBL USING (i) AS x WHERE J1_TBL.t = 
  {"i":1}
 (1 row)
 
+-- whole-row reference to a join using alias below an outer join
+SELECT t1.i, t1.t FROM J1_TBL t1
+  LEFT JOIN (J1_TBL JOIN J2_TBL USING (i) AS x) ON t1.i = x.i
+  WHERE x IS NULL ORDER BY 1, 2;
+ i |   t   
+---+-------
+ 4 | four
+ 6 | six
+ 7 | seven
+ 8 | eight
+   | null
+   | zero
+(6 rows)
+
+SELECT count(*) FROM J1_TBL t1
+  LEFT JOIN (J1_TBL JOIN J2_TBL USING (i) AS x) ON true
+  LEFT JOIN J2_TBL t2 ON x IS NULL;
+ count 
+-------
+    77
+(1 row)
+
 --
 -- NATURAL JOIN
 -- Inner equi-join on all columns with the same name

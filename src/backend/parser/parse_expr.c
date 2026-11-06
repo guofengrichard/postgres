@@ -2681,25 +2681,20 @@ transformWholeRowRef(ParseState *pstate, ParseNamespaceItem *nsitem,
 	else
 	{
 		RowExpr    *rowexpr;
-		List	   *fields;
 
 		/*
-		 * We want only as many columns as are listed in p_names->colnames,
-		 * and we should use those names not whatever possibly-aliased names
-		 * are in the RTE.  We needn't worry about marking the RTE for SELECT
-		 * access, as the common columns are surely so marked already.
+		 * We want only the columns listed in p_names->colnames, and we should
+		 * use those names not whatever possibly-aliased names are in the RTE.
+		 * We needn't worry about marking the RTE for SELECT access, as the
+		 * common columns are surely so marked already.
 		 */
-		expandRTE(nsitem->p_rte, nsitem->p_rtindex, sublevels_up,
-				  nsitem->p_returning_type, location, false, NULL, &fields);
 		rowexpr = makeNode(RowExpr);
-		rowexpr->args = list_truncate(fields,
-									  list_length(nsitem->p_names->colnames));
+		rowexpr->args = expandNSItemVars(pstate, nsitem, sublevels_up,
+										 location, NULL);
 		rowexpr->row_typeid = RECORDOID;
 		rowexpr->row_format = COERCE_IMPLICIT_CAST;
 		rowexpr->colnames = copyObject(nsitem->p_names->colnames);
 		rowexpr->location = location;
-
-		/* XXX we ought to mark the row as possibly nullable */
 
 		return (Node *) rowexpr;
 	}
