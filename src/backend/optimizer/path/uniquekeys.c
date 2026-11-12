@@ -8,6 +8,12 @@
  * whether a join relation is distinct is worked out when needed, from the
  * UniqueKeys of the base relations it consists of.
  *
+ * There are two kinds of question.  Join clauses are strict, so when matching
+ * them we need not care about rows that have NULLs in the columns of
+ * interest.  DISTINCT and GROUP BY, on the other hand, consider NULLs equal
+ * to each other, so for them only UniqueKeys that hold on those terms can be
+ * used.
+ *
  * See src/backend/optimizer/README for more information.
  *
  *
@@ -21,17 +27,25 @@
  */
 #include "postgres.h"
 
+#include "access/sysattr.h"
+#include "nodes/multibitmapset.h"
+#include "optimizer/clauses.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "utils/lsyscache.h"
 
+static bool joinrel_is_distinct_for_ecs(PlannerInfo *root, RelOptInfo *joinrel,
+										Bitmapset *known_ecs,
+										bool nulls_equal);
 static void build_base_rel_uniquekeys(PlannerInfo *root);
 static void build_plain_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel);
-static void add_uniquekey(RelOptInfo *rel, Bitmapset *eclass_indexes);
+static void add_uniquekey(RelOptInfo *rel, Bitmapset *eclass_indexes,
+						  bool null_aware);
 static int	find_ec_index(PlannerInfo *root, RelOptInfo *rel, Expr *expr,
 						  List *opfamilies, Oid collation);
 static bool rel_has_uniquekey_in(PlannerInfo *root, RelOptInfo *rel,
-								 Bitmapset *eclass_indexes);
+								 Bitmapset *eclass_indexes,
+								 bool nulls_equal);
 static Bitmapset *get_own_eclass_indexes(PlannerInfo *root, RelOptInfo *rel);
 
 
@@ -71,26 +85,12 @@ joinrel_supports_distinctness(PlannerInfo *root, RelOptInfo *joinrel)
  * its outer_is_left flag, and an expression not involving this relation on
  * the other.  Return true if no two rows emitted by the join relation could
  * possibly join to the same row of the other relation.
- *
- * A join emits each combination of its base relations' rows at most once.
- * So the join is distinct if a row of the other relation leaves only one
- * possible row for each of its base relations.  We work that out by tracking
- * the set of ECs whose values are fixed, starting with those that the clauses
- * equate to the other relation.  A base relation with a UniqueKey within that
- * set can have only one row, and so it fixes the value of every EC that has a
- * member belonging to it.  We repeat this until all base relations are
- * accounted for or we can make no more progress.
  */
 bool
 joinrel_is_distinct_for(PlannerInfo *root, RelOptInfo *joinrel,
 						List *clause_list)
 {
 	Bitmapset  *known_ecs = NULL;
-	Relids		remaining;
-	bool		found;
-
-	if (!joinrel_supports_distinctness(root, joinrel))
-		return false;
 
 	foreach_node(RestrictInfo, rinfo, clause_list)
 	{
@@ -108,6 +108,73 @@ joinrel_is_distinct_for(PlannerInfo *root, RelOptInfo *joinrel,
 		known_ecs = bms_add_member(known_ecs, ec->ec_index);
 	}
 
+	/* The clauses are strict, so rows with NULLs are of no concern */
+	return joinrel_is_distinct_for_ecs(root, joinrel, known_ecs, false);
+}
+
+/*
+ * rel_is_distinct_for_pathkeys
+ *		Does the relation return only distinct rows according to the given
+ *		pathkeys?
+ *
+ * Return true if no two rows emitted by the relation could possibly have
+ * equal values in all the pathkeys' ECs, with NULLs considered equal to each
+ * other.  The sort ordering of the pathkeys is of no interest.
+ *
+ * An empty list means all rows are considered equal, so the relation is then
+ * distinct only if it has at most one row.
+ */
+bool
+rel_is_distinct_for_pathkeys(PlannerInfo *root, RelOptInfo *rel,
+							 List *pathkeys)
+{
+	Bitmapset  *known_ecs = NULL;
+
+	foreach_node(PathKey, pathkey, pathkeys)
+	{
+		known_ecs = bms_add_member(known_ecs, pathkey->pk_eclass->ec_index);
+	}
+
+	if (IS_JOIN_REL(rel))
+		return joinrel_is_distinct_for_ecs(root, rel, known_ecs, true);
+
+	/* Otherwise, we only know about base relations */
+	if (rel->reloptkind != RELOPT_BASEREL)
+		return false;
+
+	build_base_rel_uniquekeys(root);
+
+	return rel_has_uniquekey_in(root, rel, known_ecs, true);
+}
+
+/*
+ * joinrel_is_distinct_for_ecs
+ *		Does the join relation return only distinct rows according to the
+ *		given set of ECs?
+ *
+ * Return true if no two rows emitted by the join relation could possibly
+ * have equal values in all the ECs of known_ecs, which is a set of indexes
+ * into root->eq_classes.  If nulls_equal is true, NULLs are considered equal
+ * to each other; otherwise rows having a NULL in any of the ECs are ignored.
+ *
+ * A join emits each combination of its base relations' rows at most once.
+ * So the join is distinct if fixing the values of the known ECs leaves only
+ * one possible row for each of its base relations.  A base relation with a
+ * UniqueKey within the set of known ECs can have only one row, and so it
+ * fixes the value of every EC that has a member belonging to it; those ECs
+ * are added to the set.  We repeat this until all base relations are
+ * accounted for or we can make no more progress.
+ */
+static bool
+joinrel_is_distinct_for_ecs(PlannerInfo *root, RelOptInfo *joinrel,
+							Bitmapset *known_ecs, bool nulls_equal)
+{
+	Relids		remaining;
+	bool		found;
+
+	if (!joinrel_supports_distinctness(root, joinrel))
+		return false;
+
 	/* There are no outer joins, so all the relids are base relations */
 	remaining = bms_copy(joinrel->relids);
 
@@ -121,7 +188,7 @@ joinrel_is_distinct_for(PlannerInfo *root, RelOptInfo *joinrel,
 		{
 			RelOptInfo *rel = find_base_rel(root, relid);
 
-			if (!rel_has_uniquekey_in(root, rel, known_ecs))
+			if (!rel_has_uniquekey_in(root, rel, known_ecs, nulls_equal))
 				continue;
 
 			remaining = bms_del_member(remaining, relid);
@@ -202,6 +269,9 @@ build_base_rel_uniquekeys(PlannerInfo *root)
 static void
 build_plain_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel)
 {
+	List	   *nonnullable_vars = NIL;
+	bool		nonnullable_vars_valid = false;
+
 	/* Short-circuit if no EC mentions this relation */
 	if (rel->eclass_indexes == NULL)
 		return;
@@ -209,6 +279,7 @@ build_plain_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel)
 	foreach_node(IndexOptInfo, ind, rel->indexlist)
 	{
 		Bitmapset  *key_ecs = NULL;
+		bool		null_aware = true;
 		int			c;
 
 		/*
@@ -253,11 +324,43 @@ build_plain_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel)
 				continue;
 
 			key_ecs = bms_add_member(key_ecs, ec_index);
+
+			/*
+			 * Unless the index is NULLS NOT DISTINCT, it allows duplicates
+			 * among rows that have a NULL in this column.  So the UniqueKey
+			 * is not null_aware unless the column cannot be NULL, due to a
+			 * NOT NULL constraint or a strict restriction clause.
+			 */
+			if (null_aware && !ind->nullsnotdistinct)
+			{
+				int			attno = ind->indexkeys[c];
+
+				if (attno == 0)
+					null_aware = false;
+				else if (!bms_is_member(attno, rel->notnullattnums))
+				{
+					if (!nonnullable_vars_valid)
+					{
+						foreach_node(RestrictInfo, rinfo, rel->baserestrictinfo)
+						{
+							nonnullable_vars =
+								mbms_add_members(nonnullable_vars,
+												 find_nonnullable_vars((Node *) rinfo->clause));
+						}
+						nonnullable_vars_valid = true;
+					}
+
+					if (!mbms_is_member(rel->relid,
+										attno - FirstLowInvalidHeapAttributeNumber,
+										nonnullable_vars))
+						null_aware = false;
+				}
+			}
 		}
 
 		/* Add the UniqueKey if we matched all the index columns */
 		if (c == ind->nkeycolumns)
-			add_uniquekey(rel, key_ecs);
+			add_uniquekey(rel, key_ecs, null_aware);
 	}
 }
 
@@ -266,10 +369,12 @@ build_plain_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel)
  *		Add a UniqueKey for the given set of ECs to the relation, unless it
  *		is redundant.
  *
- * A UniqueKey is redundant if another one of the relation is a subset of it.
+ * A UniqueKey is redundant if another one of the relation is a subset of it
+ * and can be used wherever it can.
  */
 static void
-add_uniquekey(RelOptInfo *rel, Bitmapset *eclass_indexes)
+add_uniquekey(RelOptInfo *rel, Bitmapset *eclass_indexes,
+			  bool null_aware)
 {
 	UniqueKey  *ukey;
 	ListCell   *lc;
@@ -279,16 +384,19 @@ add_uniquekey(RelOptInfo *rel, Bitmapset *eclass_indexes)
 		UniqueKey  *other = lfirst_node(UniqueKey, lc);
 
 		/* If an existing key makes the new one redundant, we're done */
-		if (bms_is_subset(other->eclass_indexes, eclass_indexes))
+		if (bms_is_subset(other->eclass_indexes, eclass_indexes) &&
+			(other->null_aware || !null_aware))
 			return;
 
 		/* Remove any existing key that the new one makes redundant */
-		if (bms_is_subset(eclass_indexes, other->eclass_indexes))
+		if (bms_is_subset(eclass_indexes, other->eclass_indexes) &&
+			(null_aware || !other->null_aware))
 			rel->uniquekeys = foreach_delete_current(rel->uniquekeys, lc);
 	}
 
 	ukey = makeNode(UniqueKey);
 	ukey->eclass_indexes = eclass_indexes;
+	ukey->null_aware = null_aware;
 	rel->uniquekeys = lappend(rel->uniquekeys, ukey);
 }
 
@@ -329,15 +437,21 @@ find_ec_index(PlannerInfo *root, RelOptInfo *rel, Expr *expr,
  * rel_has_uniquekey_in
  *		Does the relation have a UniqueKey that is a subset of the given set
  *		of ECs?
+ *
+ * If nulls_equal is true, only UniqueKeys that hold with NULLs considered
+ * equal to each other are of use.
  */
 static bool
 rel_has_uniquekey_in(PlannerInfo *root, RelOptInfo *rel,
-					 Bitmapset *eclass_indexes)
+					 Bitmapset *eclass_indexes, bool nulls_equal)
 {
 	foreach_node(UniqueKey, ukey, rel->uniquekeys)
 	{
 		bool		broken = false;
 		int			i = -1;
+
+		if (nulls_equal && !ukey->null_aware)
+			continue;
 
 		if (!bms_is_subset(ukey->eclass_indexes, eclass_indexes))
 			continue;

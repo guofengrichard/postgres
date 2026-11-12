@@ -1036,10 +1036,14 @@ with PathKeys, an EC that contains a constant is of no interest, so it is
 left out of the UniqueKey.  That can leave an empty UniqueKey, which means
 that the relation has at most one row.
 
-A UniqueKey says nothing about rows in which the value of one of its ECs is
-NULL, because a unique index allows any number of such rows.  That is good
-enough for matching join clauses, which are strict and so cannot be
-satisfied by such rows anyway.
+By default, a UniqueKey says nothing about rows in which the value of one of
+its ECs is NULL, because a unique index allows any number of such rows.
+That is good enough for matching join clauses, which are strict and so
+cannot be satisfied by such rows anyway.  DISTINCT and GROUP BY, however,
+consider NULLs equal to each other.  A UniqueKey that also holds on those
+terms is marked null_aware; that is the case if the index is NULLS NOT
+DISTINCT, or if each column in the UniqueKey has a NOT NULL constraint or
+is forced to be non-NULL by a strict restriction clause.
 
 We do not keep UniqueKeys for join relations.  A join relation would
 typically have many of them, most of which would never be used, and keeping
@@ -1074,10 +1078,19 @@ the join relation being equal in its output.  That is why a broken EC is
 never used.
 
 This is used to detect unique inner sides of joins (see innerrel_is_unique)
-when the inner side is itself a join.  For now only joins of plain tables
-that involve no outer joins, semijoins or antijoins are handled.  The
-UniqueKeys of base relations are built the first time they are needed, so
-that a query that never needs them does not pay for them.
+when the inner side is itself a join.
+
+The same procedure tells whether the result of the scan/join phase is
+already distinct on the DISTINCT or GROUP BY columns: start with the ECs of
+those columns, and use only UniqueKeys marked null_aware.  If so, a
+DISTINCT step is skipped, and so is a grouping step that has no aggregates
+or HAVING clause to evaluate.  (When the scan/join result is a single base
+relation, this is just a matter of finding a suitable UniqueKey.)
+
+For now only plain tables and joins of them that involve no outer joins,
+semijoins or antijoins are handled.  The UniqueKeys of base relations are
+built the first time they are needed, so that a query that never needs them
+does not pay for them.
 
 
 Order of processing for EquivalenceClasses and PathKeys
