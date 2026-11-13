@@ -82,7 +82,7 @@ extern void generate_partitionwise_join_paths(PlannerInfo *root,
 extern void create_index_paths(PlannerInfo *root, RelOptInfo *rel);
 extern bool relation_has_unique_index_for(PlannerInfo *root, RelOptInfo *rel,
 										  List *restrictlist,
-										  List **extra_clauses);
+										  List *base_restrictions);
 extern bool indexcol_is_bool_constant_for_query(PlannerInfo *root,
 												IndexOptInfo *index,
 												int indexcol);
