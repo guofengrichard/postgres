@@ -4133,16 +4133,15 @@ ec_member_matches_indexcol(PlannerInfo *root, RelOptInfo *rel,
  * outer_is_left flag is used to identify which side we should look at:
  * left side if outer_is_left is false, right side if it is true.
  *
- * The caller need only supply equality conditions arising from joins;
- * this routine automatically adds in any usable baserestrictinfo clauses.
+ * The caller need only supply equality conditions arising from joins in
+ * restrictlist, plus a list of the relation's restriction clauses in
+ * base_restrictions, from which this routine picks out the usable ones.
+ * That is normally rel->baserestrictinfo, but can be a subset of it.
  * (Note that the passed-in restrictlist will be destructively modified!)
- *
- * If extra_clauses isn't NULL, return baserestrictinfo clauses which were used
- * to derive uniqueness.
  */
 bool
 relation_has_unique_index_for(PlannerInfo *root, RelOptInfo *rel,
-							  List *restrictlist, List **extra_clauses)
+							  List *restrictlist, List *base_restrictions)
 {
 	ListCell   *ic;
 
@@ -4151,10 +4150,10 @@ relation_has_unique_index_for(PlannerInfo *root, RelOptInfo *rel,
 		return false;
 
 	/*
-	 * Examine the rel's restriction clauses for usable var = const clauses
+	 * Examine the given restriction clauses for usable var = const clauses
 	 * that we can add to the restrictlist.
 	 */
-	foreach(ic, rel->baserestrictinfo)
+	foreach(ic, base_restrictions)
 	{
 		RestrictInfo *restrictinfo = (RestrictInfo *) lfirst(ic);
 
@@ -4196,7 +4195,6 @@ relation_has_unique_index_for(PlannerInfo *root, RelOptInfo *rel,
 	{
 		IndexOptInfo *ind = (IndexOptInfo *) lfirst(ic);
 		int			c;
-		List	   *exprs = NIL;
 
 		/*
 		 * If the index is not unique, or not immediately enforced, or if it's
@@ -4247,26 +4245,7 @@ relation_has_unique_index_for(PlannerInfo *root, RelOptInfo *rel,
 					rexpr = get_leftop(rinfo->clause);
 
 				if (match_index_to_operand(rexpr, c, ind))
-				{
-					if (bms_membership(rinfo->clause_relids) == BMS_SINGLETON)
-					{
-						MemoryContext oldMemCtx =
-							MemoryContextSwitchTo(root->planner_cxt);
-
-						/*
-						 * Add filter clause into a list allowing caller to
-						 * know if uniqueness have made not only by join
-						 * clauses.
-						 */
-						Assert(bms_is_empty(rinfo->left_relids) ||
-							   bms_is_empty(rinfo->right_relids));
-						if (extra_clauses)
-							exprs = lappend(exprs, rinfo);
-						MemoryContextSwitchTo(oldMemCtx);
-					}
-
 					break;		/* found a match; column is unique */
-				}
 			}
 
 			if (lc == NULL)
@@ -4275,11 +4254,7 @@ relation_has_unique_index_for(PlannerInfo *root, RelOptInfo *rel,
 
 		/* Matched all key columns of this index? */
 		if (c == ind->nkeycolumns)
-		{
-			if (extra_clauses)
-				*extra_clauses = exprs;
 			return true;
-		}
 	}
 
 	return false;

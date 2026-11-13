@@ -71,23 +71,14 @@ static void remove_rels_from_query_tree(PlannerInfo *root,
 static bool reduce_semijoin_in_jointree(Node *jtnode, Relids syn_righthand);
 static bool rel_supports_distinctness(PlannerInfo *root, RelOptInfo *rel);
 static bool rel_is_distinct_for(PlannerInfo *root, RelOptInfo *rel,
-								List *clause_list, List **extra_clauses);
+								List *clause_list);
 static DistinctColInfo *distinct_col_search(int colno, List *distinct_cols);
-static bool innerrel_is_unique_ext(PlannerInfo *root,
-								   Relids joinrelids,
-								   Relids outerrelids,
-								   RelOptInfo *innerrel,
-								   JoinType jointype,
-								   List *restrictlist,
-								   bool force_cache,
-								   List **extra_clauses);
 static bool is_innerrel_unique_for(PlannerInfo *root,
 								   Relids joinrelids,
 								   Relids outerrelids,
 								   RelOptInfo *innerrel,
 								   JoinType jointype,
-								   List *restrictlist,
-								   List **extra_clauses);
+								   List *restrictlist);
 static Node *remove_rel_from_jointree(Node *jtnode, int relid,
 									  Node **orphan_quals, int *nremoved);
 static Node *merge_quals(Node *quals1, Node *quals2);
@@ -354,7 +345,7 @@ join_is_removable(PlannerInfo *root, SpecialJoinInfo *sjinfo)
 	 * Now that we have the relevant equality join clauses, try to prove the
 	 * innerrel distinct.
 	 */
-	if (rel_is_distinct_for(root, innerrel, clause_list, NULL))
+	if (rel_is_distinct_for(root, innerrel, clause_list))
 		return true;
 
 	/*
@@ -652,15 +643,9 @@ rel_supports_distinctness(PlannerInfo *root, RelOptInfo *rel)
  * Note that the passed-in clause_list may be destructively modified!  This
  * is OK for current uses, because the clause_list is built by the caller for
  * the sole purpose of passing to this function.
- *
- * (*extra_clauses) to be set to the right sides of baserestrictinfo clauses,
- * looking like "x = const" if distinctness is derived from such clauses, not
- * joininfo clauses.  Pass NULL to the extra_clauses if this value is not
- * needed.
  */
 static bool
-rel_is_distinct_for(PlannerInfo *root, RelOptInfo *rel, List *clause_list,
-					List **extra_clauses)
+rel_is_distinct_for(PlannerInfo *root, RelOptInfo *rel, List *clause_list)
 {
 	/*
 	 * We could skip a couple of tests here if we assume all callers checked
@@ -673,10 +658,11 @@ rel_is_distinct_for(PlannerInfo *root, RelOptInfo *rel, List *clause_list,
 	{
 		/*
 		 * Examine the indexes to see if we have a matching unique index.
-		 * relation_has_unique_index_for automatically adds any usable
-		 * restriction clauses for the rel, so we needn't do that here.
+		 * relation_has_unique_index_for picks out the usable restriction
+		 * clauses for the rel, so we needn't do that here.
 		 */
-		if (relation_has_unique_index_for(root, rel, clause_list, extra_clauses))
+		if (relation_has_unique_index_for(root, rel, clause_list,
+										  rel->baserestrictinfo))
 			return true;
 	}
 	else if (rel->rtekind == RTE_SUBQUERY)
@@ -1019,34 +1005,8 @@ innerrel_is_unique(PlannerInfo *root,
 				   List *restrictlist,
 				   bool force_cache)
 {
-	return innerrel_is_unique_ext(root, joinrelids, outerrelids, innerrel,
-								  jointype, restrictlist, force_cache, NULL);
-}
-
-/*
- * innerrel_is_unique_ext
- *	  Do the same as innerrel_is_unique(), but also set to (*extra_clauses)
- *	  additional clauses from a baserestrictinfo list used to prove the
- *	  uniqueness.
- *
- * A non-NULL extra_clauses indicates that we're checking for self-join and
- * correspondingly dealing with filtered clauses.
- */
-static bool
-innerrel_is_unique_ext(PlannerInfo *root,
-					   Relids joinrelids,
-					   Relids outerrelids,
-					   RelOptInfo *innerrel,
-					   JoinType jointype,
-					   List *restrictlist,
-					   bool force_cache,
-					   List **extra_clauses)
-{
 	MemoryContext old_context;
 	ListCell   *lc;
-	UniqueRelInfo *uniqueRelInfo;
-	List	   *outer_exprs = NIL;
-	bool		self_join = (extra_clauses != NULL);
 
 	/* Certainly can't prove uniqueness when there are no joinclauses */
 	if (restrictlist == NIL)
@@ -1061,28 +1021,17 @@ innerrel_is_unique_ext(PlannerInfo *root,
 
 	/*
 	 * Query the cache to see if we've managed to prove that innerrel is
-	 * unique for any subset of this outerrel.  For non-self-join search, we
-	 * don't need an exact match, as extra outerrels can't make the innerrel
-	 * any less unique (or more formally, the restrictlist for a join to a
-	 * superset outerrel must be a superset of the conditions we successfully
-	 * used before). For self-join search, we require an exact match of
-	 * outerrels because we need extra clauses to be valid for our case. Also,
-	 * for self-join checking we've filtered the clauses list.  Thus, we can
-	 * match only the result cached for a self-join search for another
-	 * self-join check.
+	 * unique for any subset of this outerrel.  We don't need an exact match,
+	 * as extra outerrels can't make the innerrel any less unique (or more
+	 * formally, the restrictlist for a join to a superset outerrel must be a
+	 * superset of the conditions we successfully used before).
 	 */
 	foreach(lc, innerrel->unique_for_rels)
 	{
-		uniqueRelInfo = (UniqueRelInfo *) lfirst(lc);
+		Relids		unique_for_rels = (Relids) lfirst(lc);
 
-		if ((!self_join && bms_is_subset(uniqueRelInfo->outerrelids, outerrelids)) ||
-			(self_join && bms_equal(uniqueRelInfo->outerrelids, outerrelids) &&
-			 uniqueRelInfo->self_join))
-		{
-			if (extra_clauses)
-				*extra_clauses = uniqueRelInfo->extra_clauses;
+		if (bms_is_subset(unique_for_rels, outerrelids))
 			return true;		/* Success! */
-		}
 	}
 
 	/*
@@ -1099,8 +1048,7 @@ innerrel_is_unique_ext(PlannerInfo *root,
 
 	/* No cached information, so try to make the proof. */
 	if (is_innerrel_unique_for(root, joinrelids, outerrelids, innerrel,
-							   jointype, restrictlist,
-							   self_join ? &outer_exprs : NULL))
+							   jointype, restrictlist))
 	{
 		/*
 		 * Cache the positive result for future probes, being sure to keep it
@@ -1113,16 +1061,10 @@ innerrel_is_unique_ext(PlannerInfo *root,
 		 * supersets of them anyway.
 		 */
 		old_context = MemoryContextSwitchTo(root->planner_cxt);
-		uniqueRelInfo = makeNode(UniqueRelInfo);
-		uniqueRelInfo->outerrelids = bms_copy(outerrelids);
-		uniqueRelInfo->self_join = self_join;
-		uniqueRelInfo->extra_clauses = outer_exprs;
 		innerrel->unique_for_rels = lappend(innerrel->unique_for_rels,
-											uniqueRelInfo);
+											bms_copy(outerrelids));
 		MemoryContextSwitchTo(old_context);
 
-		if (extra_clauses)
-			*extra_clauses = outer_exprs;
 		return true;			/* Success! */
 	}
 	else
@@ -1165,8 +1107,7 @@ is_innerrel_unique_for(PlannerInfo *root,
 					   Relids outerrelids,
 					   RelOptInfo *innerrel,
 					   JoinType jointype,
-					   List *restrictlist,
-					   List **extra_clauses)
+					   List *restrictlist)
 {
 	List	   *clause_list = NIL;
 	ListCell   *lc;
@@ -1208,7 +1149,7 @@ is_innerrel_unique_for(PlannerInfo *root,
 	}
 
 	/* Let rel_is_distinct_for() do the hard work */
-	return rel_is_distinct_for(root, innerrel, clause_list, extra_clauses);
+	return rel_is_distinct_for(root, innerrel, clause_list);
 }
 
 /*
@@ -1718,43 +1659,45 @@ split_selfjoin_quals(List *joinquals, List **selfjoinquals,
 }
 
 /*
- * Check that each base restriction used to prove uniqueness of relid has
- * a matching restriction in outer->baserestrictinfo, after replacing
- * relid with outer->relid.
+ * Return the mergejoinable restrictions of krel that have a matching
+ * restriction in rrel->baserestrictinfo, after replacing krel->relid with
+ * rrel->relid.
  *
  * Require equal() clauses, including the operator and input collation.
  * Formerly this tried to match commuted forms of clauses, but that added
  * a great deal of extra complication without much extra value.
  */
-static bool
-match_unique_clauses(RelOptInfo *outer, List *uclauses, Index relid)
+static List *
+get_shared_restrictions(RelOptInfo *krel, RelOptInfo *rrel)
 {
-	Assert(outer->relid > 0 && relid > 0);
+	List	   *result = NIL;
 
-	foreach_node(RestrictInfo, rinfo, uclauses)
+	Assert(krel->relid > 0 && rrel->relid > 0);
+
+	foreach_node(RestrictInfo, rinfo, krel->baserestrictinfo)
 	{
 		Expr	   *clause;
-		bool		matched = false;
 
-		/* Convert the clause from uclauses to use outer's Vars */
+		/* Others are of no use to relation_has_unique_index_for */
+		if (rinfo->mergeopfamilies == NIL)
+			continue;
+
+		/* Convert the clause to use rrel's Vars */
 		clause = (Expr *) copyObject(rinfo->clause);
-		ChangeVarNodes((Node *) clause, relid, outer->relid, 0);
+		ChangeVarNodes((Node *) clause, krel->relid, rrel->relid, 0);
 
-		/* Look for a matching restriction on the outer relation */
-		foreach_node(RestrictInfo, orinfo, outer->baserestrictinfo)
+		/* Look for a matching restriction on rrel */
+		foreach_node(RestrictInfo, orinfo, rrel->baserestrictinfo)
 		{
 			if (equal(clause, orinfo->clause))
 			{
-				matched = true;
+				result = lappend(result, rinfo);
 				break;
 			}
 		}
-
-		if (!matched)
-			return false;
 	}
 
-	return true;
+	return result;
 }
 
 /*
@@ -1794,11 +1737,11 @@ remove_self_joins_one_group(PlannerInfo *root, Relids relids)
 			List	   *restrictlist;
 			List	   *selfjoinquals;
 			List	   *otherjoinquals;
+			List	   *sharedquals;
 			ListCell   *lc;
 			bool		jinfo_check = true;
 			PlanRowMark *kmark = NULL;
 			PlanRowMark *rmark = NULL;
-			List	   *uclauses = NIL;
 
 			/* A sanity check: the relations have the same Oid. */
 			Assert(root->simple_rte_array[k]->relid ==
@@ -1872,8 +1815,6 @@ remove_self_joins_one_group(PlannerInfo *root, Relids relids)
 			restrictlist = generate_join_implied_equalities(root, joinrelids,
 															rrel->relids,
 															krel, NULL);
-			if (restrictlist == NIL)
-				continue;
 
 			/*
 			 * Process restrictlist to separate the self-join quals from the
@@ -1886,38 +1827,21 @@ remove_self_joins_one_group(PlannerInfo *root, Relids relids)
 				   (list_length(selfjoinquals) + list_length(otherjoinquals)));
 
 			/*
-			 * To enable SJE for the only degenerate case without any self
-			 * join clauses at all, add baserestrictinfo to this list. The
-			 * degenerate case works only if both sides have the same clause.
-			 * So doesn't matter which side to add.
+			 * Each row of rrel must match nothing but its own row of krel.
+			 * That holds if every key column of some unique index of krel is
+			 * equated to the same column of rrel, either by a self-join qual
+			 * or by a restriction that both relations have.  A restriction of
+			 * krel alone is no help: in "WHERE s1.b = s2.b AND s1.a = 1 AND
+			 * s2.a = 2" with a unique index on (a,b), each row matches at
+			 * most one row, but never its own.
 			 */
-			selfjoinquals = list_concat(selfjoinquals, krel->baserestrictinfo);
+			foreach_node(RestrictInfo, rinfo, selfjoinquals)
+				rinfo->outer_is_left = bms_is_member(r, rinfo->left_relids);
 
-			/*
-			 * Determine if the rrel can duplicate outer rows. We must bypass
-			 * the unique rel cache here since we're possibly using a subset
-			 * of join quals. We can use 'force_cache' == true when all join
-			 * quals are self-join quals.  Otherwise, we could end up putting
-			 * false negatives in the cache.
-			 */
-			if (!innerrel_is_unique_ext(root, joinrelids, rrel->relids,
-										krel, JOIN_INNER, selfjoinquals,
-										list_length(otherjoinquals) == 0,
-										&uclauses))
-				continue;
+			sharedquals = get_shared_restrictions(krel, rrel);
 
-			/*
-			 * 'uclauses' is the copy of outer->baserestrictinfo that are
-			 * associated with an index.  We proved by matching selfjoinquals
-			 * to a unique index that the outer relation has at most one
-			 * matching row for each inner row.  Sometimes that is not enough.
-			 * e.g. "WHERE s1.b = s2.b AND s1.a = 1 AND s2.a = 2" when the
-			 * unique index is (a,b).  Having non-empty uclauses, we must
-			 * validate that the inner baserestrictinfo contains the same
-			 * expressions, or we won't match the same row on each side of the
-			 * join.
-			 */
-			if (!match_unique_clauses(rrel, uclauses, krel->relid))
+			if (!relation_has_unique_index_for(root, krel, selfjoinquals,
+											   sharedquals))
 				continue;
 
 			/* OK, remove rrel from the query */

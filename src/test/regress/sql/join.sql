@@ -3817,6 +3817,10 @@ SELECT * FROM sj j1, sj j2 WHERE j1.b = j2.b AND 1 = j1.a AND j2.a = 1;
 -- Return no rows
 SELECT * FROM sj j1, sj j2 WHERE j1.b = j2.b AND 1 = j1.a AND j2.a = 1;
 
+-- Remove SJ without any join clause, defining uniqueness by a constant
+EXPLAIN (COSTS OFF)
+SELECT * FROM sj j1, sj j2 WHERE j1.a = 2 AND j2.a = 2;
+
 -- SJE Corner case: a 'a.x=a.x' clause, have replaced with 'a.x IS NOT NULL'
 -- after SJ elimination it shouldn't be a mergejoinable clause.
 EXPLAIN (COSTS OFF)
@@ -3871,7 +3875,7 @@ EXPLAIN (COSTS OFF)
 SELECT * FROM sj j1, sj j2
 	WHERE j1.b = j2.b AND j1.a = 2 AND j1.c = 3 AND j2.a = 2 AND 3 = j2.c;
 
--- Don't remove SJ
+-- Remove SJ by the unique index on c, though the restrictions on a differ
 EXPLAIN (COSTS OFF)
 	SELECT * FROM sj j1, sj j2
 	WHERE j1.b = j2.b AND 2 = j1.a AND j1.c = 3 AND j2.a = 1 AND 3 = j2.c;
