@@ -4298,7 +4298,8 @@ is_redundant_grouping(PlannerInfo *root, RelOptInfo *input_rel)
 	pathkeys = list_copy_head(root->group_pathkeys,
 							  root->num_groupby_pathkeys);
 
-	return rel_is_distinct_for_pathkeys(root, input_rel, pathkeys);
+	/* grouping considers NULLs equal to each other */
+	return rel_is_distinct_for_pathkeys(root, input_rel, pathkeys, true);
 }
 
 /*
@@ -4321,7 +4322,7 @@ is_redundant_distinct(PlannerInfo *root, RelOptInfo *input_rel)
 
 	/* As above, it's fine if distinct_pathkeys is empty */
 	return rel_is_distinct_for_pathkeys(root, input_rel,
-										root->distinct_pathkeys);
+										root->distinct_pathkeys, true);
 }
 
 /*
@@ -9036,13 +9037,45 @@ create_unique_paths(PlannerInfo *root, RelOptInfo *rel, SpecialJoinInfo *sjinfo)
 		unique_rel->reltarget = create_pathtarget(root, newtlist);
 	}
 
-	/* build unique paths based on input rel's pathlist */
-	create_final_unique_paths(root, rel, sortPathkeys, groupClause,
-							  sjinfo, unique_rel);
+	/*
+	 * If the input rel is already distinct on the values to be unique-ified,
+	 * there is nothing to do, so just use its paths.  The semijoin's
+	 * operators are strict, so rows with NULLs in those values cannot match
+	 * anything and it doesn't matter if there are duplicates among them.
+	 *
+	 * We don't try this for child rels, nor if the sortPathkeys don't cover
+	 * all the values.
+	 */
+	if (!IS_OTHER_REL(rel) && sjinfo->semi_can_btree &&
+		rel_is_distinct_for_pathkeys(root, rel, sortPathkeys, false))
+	{
+		unique_rel->rows = rel->rows;
 
-	/* build unique paths based on input rel's partial_pathlist */
-	create_partial_unique_paths(root, rel, sortPathkeys, groupClause,
-								sjinfo, unique_rel);
+		foreach_ptr(Path, input_path, rel->pathlist)
+		{
+			/*
+			 * As in create_final_unique_paths, ignore parameterized paths
+			 * that are not the cheapest-total path.
+			 */
+			if (input_path->param_info &&
+				input_path != rel->cheapest_total_path)
+				continue;
+
+			add_path(unique_rel, (Path *)
+					 create_projection_path(root, unique_rel, input_path,
+											unique_rel->reltarget));
+		}
+	}
+	else
+	{
+		/* build unique paths based on input rel's pathlist */
+		create_final_unique_paths(root, rel, sortPathkeys, groupClause,
+								  sjinfo, unique_rel);
+
+		/* build unique paths based on input rel's partial_pathlist */
+		create_partial_unique_paths(root, rel, sortPathkeys, groupClause,
+									sjinfo, unique_rel);
+	}
 
 	/* Now choose the best path(s) */
 	set_cheapest(unique_rel);

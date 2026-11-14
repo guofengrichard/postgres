@@ -220,7 +220,7 @@ extern bool joinrel_supports_distinctness(PlannerInfo *root,
 extern bool joinrel_is_distinct_for(PlannerInfo *root, RelOptInfo *joinrel,
 									List *clause_list);
 extern bool rel_is_distinct_for_pathkeys(PlannerInfo *root, RelOptInfo *rel,
-										 List *pathkeys);
+										 List *pathkeys, bool nulls_equal);
 
 /*
  * pathkeys.c

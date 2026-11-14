@@ -143,15 +143,16 @@ joinrel_is_distinct_for(PlannerInfo *root, RelOptInfo *joinrel,
  *		pathkeys?
  *
  * Return true if no two rows emitted by the relation could possibly have
- * equal values in all the pathkeys' ECs, with NULLs considered equal to each
- * other.  The sort ordering of the pathkeys is of no interest.
+ * equal values in all the pathkeys' ECs.  If nulls_equal is true, NULLs are
+ * considered equal to each other; otherwise rows having a NULL in any of the
+ * ECs are ignored.  The sort ordering of the pathkeys is of no interest.
  *
  * An empty list means all rows are considered equal, so the relation is then
  * distinct only if it has at most one row.
  */
 bool
 rel_is_distinct_for_pathkeys(PlannerInfo *root, RelOptInfo *rel,
-							 List *pathkeys)
+							 List *pathkeys, bool nulls_equal)
 {
 	Bitmapset  *known_ecs = NULL;
 
@@ -171,9 +172,10 @@ rel_is_distinct_for_pathkeys(PlannerInfo *root, RelOptInfo *rel,
 	}
 
 	if (IS_JOIN_REL(rel))
-		return joinrel_is_distinct_for_ecs(root, rel, known_ecs, true);
+		return joinrel_is_distinct_for_ecs(root, rel, known_ecs, nulls_equal);
 
-	return rel_has_uniquekey_in(root, rel, known_ecs, NULL, true, false);
+	return rel_has_uniquekey_in(root, rel, known_ecs, NULL, nulls_equal,
+								false);
 }
 
 /*

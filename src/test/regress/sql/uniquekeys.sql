@@ -228,4 +228,26 @@ select distinct on (id) id, x from uk_a;
 explain (costs off)
 select distinct id, generate_series(1, 2) from uk_a;
 
+--
+-- Test skipping the unique-ification of a semijoin's right-hand side.  We
+-- disable hash and merge joins so that the planner prefers to scan the
+-- right-hand side first, which requires it to be unique.
+--
+
+set enable_hashjoin = off;
+set enable_mergejoin = off;
+
+-- the right-hand side is distinct on b.id
+explain (costs off)
+select * from uk_a a
+where a.id in (select b.id from uk_b b join uk_c c on b.x = c.id);
+
+-- but not on b.x
+explain (costs off)
+select * from uk_a a
+where a.id in (select b.x from uk_b b join uk_c c on b.x = c.id);
+
+reset enable_hashjoin;
+reset enable_mergejoin;
+
 drop table uk_a, uk_b, uk_c, uk_d, uk_n;

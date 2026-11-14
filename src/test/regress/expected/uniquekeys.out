@@ -787,4 +787,45 @@ select distinct id, generate_series(1, 2) from uk_a;
          ->  Seq Scan on uk_a
 (4 rows)
 
+--
+-- Test skipping the unique-ification of a semijoin's right-hand side.  We
+-- disable hash and merge joins so that the planner prefers to scan the
+-- right-hand side first, which requires it to be unique.
+--
+set enable_hashjoin = off;
+set enable_mergejoin = off;
+-- the right-hand side is distinct on b.id
+explain (costs off)
+select * from uk_a a
+where a.id in (select b.id from uk_b b join uk_c c on b.x = c.id);
+                      QUERY PLAN                       
+-------------------------------------------------------
+ Nested Loop
+   ->  Nested Loop
+         ->  Seq Scan on uk_b b
+         ->  Index Only Scan using uk_c_pkey on uk_c c
+               Index Cond: (id = b.x)
+   ->  Index Scan using uk_a_pkey on uk_a a
+         Index Cond: (id = b.id)
+(7 rows)
+
+-- but not on b.x
+explain (costs off)
+select * from uk_a a
+where a.id in (select b.x from uk_b b join uk_c c on b.x = c.id);
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Nested Loop
+   ->  HashAggregate
+         Group Key: b.x
+         ->  Nested Loop
+               ->  Seq Scan on uk_b b
+               ->  Index Only Scan using uk_c_pkey on uk_c c
+                     Index Cond: (id = b.x)
+   ->  Index Scan using uk_a_pkey on uk_a a
+         Index Cond: (id = b.x)
+(9 rows)
+
+reset enable_hashjoin;
+reset enable_mergejoin;
 drop table uk_a, uk_b, uk_c, uk_d, uk_n;

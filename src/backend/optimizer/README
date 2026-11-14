@@ -1195,6 +1195,13 @@ join relation that includes the right-hand side of a semijoin but only part
 of its left-hand side, which can only be formed by making the right-hand
 side unique first.
 
+The right-hand side of a semijoin can itself be asked about.  One way to
+perform a semijoin is to make its right-hand side unique and then do a
+plain join (see create_unique_paths).  If the right-hand side is already
+distinct for the values that the semijoin's clauses compare, ignoring rows
+in which those are NULL since such rows cannot match, the paths of the
+right-hand side are used for that as they are.
+
 For now only plain tables and joins of them are handled.  The UniqueKeys of
 base relations are built the first time they are needed, so that a query
 that never needs them does not pay for them.
