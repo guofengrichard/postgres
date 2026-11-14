@@ -9094,10 +9094,9 @@ create_unique_paths(PlannerInfo *root, RelOptInfo *rel, SpecialJoinInfo *sjinfo)
 	 * operators are strict, so rows with NULLs in those values cannot match
 	 * anything and it doesn't matter if there are duplicates among them.
 	 *
-	 * We don't try this for child rels, nor if the sortPathkeys don't cover
-	 * all the values.
+	 * We don't try this if the sortPathkeys don't cover all the values.
 	 */
-	if (!IS_OTHER_REL(rel) && sjinfo->semi_can_btree &&
+	if (sjinfo->semi_can_btree &&
 		rel_is_distinct_for_pathkeys(root, rel, sortPathkeys, false))
 	{
 		unique_rel->rows = rel->rows;

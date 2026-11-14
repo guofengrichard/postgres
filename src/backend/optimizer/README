@@ -1246,9 +1246,15 @@ there is no GROUP BY.  Window functions neither add nor remove rows, so
 their output is distinct if the relation below them is distinct for the
 DISTINCT columns (see is_redundant_distinct).
 
-For now only plain tables, subqueries and joins of them are handled.  The UniqueKeys of
-base relations are built the first time they are needed, so that a query
-that never needs them does not pay for them.
+Appendrel children have no UniqueKeys.  The rows of a child relation are a
+subset of its parent's rows, and the ECs that a question about a child join
+refers to are those of its parent, with the child's expressions as child
+members.  So a child join is distinct if its parent is, and we just ask
+about the parent.  That misses what could be proven from indexes that only
+individual partitions have.
+
+The UniqueKeys of base relations are built the first time they are needed,
+so that a query that never needs them does not pay for them.
 
 
 Order of processing for EquivalenceClasses and PathKeys

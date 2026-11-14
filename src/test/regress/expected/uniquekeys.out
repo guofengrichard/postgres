@@ -1140,6 +1140,136 @@ where a.id in (select b.x from uk_b b join uk_c c on b.x = c.id);
          Index Cond: (id = b.x)
 (9 rows)
 
+--
+-- Test child relations under partitionwise join.
+--
+create table uk_p (id int primary key, x int, y int) partition by range (id);
+create table uk_p1 partition of uk_p for values from (0) to (100);
+create table uk_p2 partition of uk_p for values from (100) to (200);
+create table uk_q (id int primary key, x int, y int) partition by range (id);
+create table uk_q1 partition of uk_q for values from (0) to (100);
+create table uk_q2 partition of uk_q for values from (100) to (200);
+set enable_partitionwise_join = on;
+-- a child relation is unique through its own index
+explain (verbose, costs off)
+select * from uk_p p join uk_q q on p.id = q.id;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Append
+   ->  Nested Loop
+         Output: p_1.id, p_1.x, p_1.y, q_1.id, q_1.x, q_1.y
+         Inner Unique: true
+         ->  Seq Scan on public.uk_p1 p_1
+               Output: p_1.id, p_1.x, p_1.y
+         ->  Index Scan using uk_q1_pkey on public.uk_q1 q_1
+               Output: q_1.id, q_1.x, q_1.y
+               Index Cond: (q_1.id = p_1.id)
+   ->  Nested Loop
+         Output: p_2.id, p_2.x, p_2.y, q_2.id, q_2.x, q_2.y
+         Inner Unique: true
+         ->  Seq Scan on public.uk_p2 p_2
+               Output: p_2.id, p_2.x, p_2.y
+         ->  Index Scan using uk_q2_pkey on public.uk_q2 q_2
+               Output: q_2.id, q_2.x, q_2.y
+               Index Cond: (q_2.id = p_2.id)
+(17 rows)
+
+-- a child join is unique if its parent is
+explain (verbose, costs off)
+select * from uk_p p left join
+  (uk_q q join uk_p p2 on q.id = p2.id) on p.id = q.id;
+                                     QUERY PLAN                                      
+-------------------------------------------------------------------------------------
+ Append
+   ->  Nested Loop Left Join
+         Output: p_1.id, p_1.x, p_1.y, q_1.id, q_1.x, q_1.y, p2_1.id, p2_1.x, p2_1.y
+         Inner Unique: true
+         ->  Seq Scan on public.uk_p1 p_1
+               Output: p_1.id, p_1.x, p_1.y
+         ->  Nested Loop
+               Output: q_1.id, q_1.x, q_1.y, p2_1.id, p2_1.x, p2_1.y
+               Inner Unique: true
+               ->  Index Scan using uk_q1_pkey on public.uk_q1 q_1
+                     Output: q_1.id, q_1.x, q_1.y
+                     Index Cond: (q_1.id = p_1.id)
+               ->  Index Scan using uk_p1_pkey on public.uk_p1 p2_1
+                     Output: p2_1.id, p2_1.x, p2_1.y
+                     Index Cond: (p2_1.id = q_1.id)
+   ->  Nested Loop Left Join
+         Output: p_2.id, p_2.x, p_2.y, q_2.id, q_2.x, q_2.y, p2_2.id, p2_2.x, p2_2.y
+         Inner Unique: true
+         ->  Seq Scan on public.uk_p2 p_2
+               Output: p_2.id, p_2.x, p_2.y
+         ->  Nested Loop
+               Output: q_2.id, q_2.x, q_2.y, p2_2.id, p2_2.x, p2_2.y
+               Inner Unique: true
+               ->  Index Scan using uk_q2_pkey on public.uk_q2 q_2
+                     Output: q_2.id, q_2.x, q_2.y
+                     Index Cond: (q_2.id = p_2.id)
+               ->  Index Scan using uk_p2_pkey on public.uk_p2 p2_2
+                     Output: p2_2.id, p2_2.x, p2_2.y
+                     Index Cond: (p2_2.id = q_2.id)
+(29 rows)
+
+explain (verbose, costs off)
+select * from uk_p p left join
+  (uk_q q join uk_p p2 on q.x = p2.id) on p.id = p2.id;
+                                   QUERY PLAN                                   
+--------------------------------------------------------------------------------
+ Gather
+   Output: p.id, p.x, p.y, q.id, q.x, q.y, p2.id, p2.x, p2.y
+   Workers Planned: 2
+   ->  Nested Loop Left Join
+         Output: p.id, p.x, p.y, q.id, q.x, q.y, p2.id, p2.x, p2.y
+         Join Filter: (p.id = p2.id)
+         ->  Parallel Append
+               ->  Parallel Seq Scan on public.uk_p1 p_1
+                     Output: p_1.id, p_1.x, p_1.y
+               ->  Parallel Seq Scan on public.uk_p2 p_2
+                     Output: p_2.id, p_2.x, p_2.y
+         ->  Materialize
+               Output: q.id, q.x, q.y, p2.id, p2.x, p2.y
+               ->  Nested Loop
+                     Output: q.id, q.x, q.y, p2.id, p2.x, p2.y
+                     Inner Unique: true
+                     ->  Append
+                           ->  Seq Scan on public.uk_q1 q_1
+                                 Output: q_1.id, q_1.x, q_1.y
+                           ->  Seq Scan on public.uk_q2 q_2
+                                 Output: q_2.id, q_2.x, q_2.y
+                     ->  Append
+                           ->  Index Scan using uk_p1_pkey on public.uk_p1 p2_1
+                                 Output: p2_1.id, p2_1.x, p2_1.y
+                                 Index Cond: (p2_1.id = q.x)
+                           ->  Index Scan using uk_p2_pkey on public.uk_p2 p2_2
+                                 Output: p2_2.id, p2_2.x, p2_2.y
+                                 Index Cond: (p2_2.id = q.x)
+(28 rows)
+
+-- and need not be unique-ified if its parent need not be
+explain (costs off)
+select * from uk_p p
+where p.id in (select q.id from uk_q q join uk_p p2 on q.id = p2.id);
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ Append
+   ->  Nested Loop
+         ->  Nested Loop
+               ->  Seq Scan on uk_q1 q_1
+               ->  Index Only Scan using uk_p1_pkey on uk_p1 p2_1
+                     Index Cond: (id = q_1.id)
+         ->  Index Scan using uk_p1_pkey on uk_p1 p_1
+               Index Cond: (id = q_1.id)
+   ->  Nested Loop
+         ->  Nested Loop
+               ->  Seq Scan on uk_q2 q_2
+               ->  Index Only Scan using uk_p2_pkey on uk_p2 p2_2
+                     Index Cond: (id = q_2.id)
+         ->  Index Scan using uk_p2_pkey on uk_p2 p_2
+               Index Cond: (id = q_2.id)
+(15 rows)
+
+reset enable_partitionwise_join;
 reset enable_hashjoin;
 reset enable_mergejoin;
-drop table uk_a, uk_b, uk_c, uk_d, uk_n;
+drop table uk_a, uk_b, uk_c, uk_d, uk_n, uk_p, uk_q;

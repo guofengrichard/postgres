@@ -104,6 +104,10 @@ joinrel_supports_distinctness(PlannerInfo *root, RelOptInfo *joinrel)
 
 	Assert(IS_JOIN_REL(joinrel));
 
+	/* For a child join, we look at its parent; see joinrel_is_distinct_for */
+	if (IS_OTHER_REL(joinrel))
+		joinrel = joinrel->top_parent;
+
 	/* A grouped join rel's rows are not combinations of base rel rows */
 	if (IS_GROUPED_REL(joinrel))
 		return false;
@@ -142,6 +146,14 @@ joinrel_is_distinct_for(PlannerInfo *root, RelOptInfo *joinrel,
 
 	if (!joinrel_supports_distinctness(root, joinrel))
 		return false;
+
+	/*
+	 * A child join's rows are a subset of its parent's rows, and its clauses
+	 * use the same ECs as its parent's.  So it is distinct if its parent is,
+	 * and we need no UniqueKeys for child relations.
+	 */
+	if (IS_OTHER_REL(joinrel))
+		joinrel = joinrel->top_parent;
 
 	foreach_node(RestrictInfo, rinfo, clause_list)
 	{
@@ -237,6 +249,10 @@ rel_is_distinct_for_pathkeys(PlannerInfo *root, RelOptInfo *rel,
 							 List *pathkeys, bool nulls_equal)
 {
 	Bitmapset  *known_ecs = NULL;
+
+	/* As in joinrel_is_distinct_for, look at the parent of a child rel */
+	if (IS_OTHER_REL(rel))
+		rel = rel->top_parent;
 
 	/* We know nothing about relations other than these */
 	if (!IS_JOIN_REL(rel) && rel->reloptkind != RELOPT_BASEREL)
