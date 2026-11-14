@@ -1186,10 +1186,18 @@ column of the relation that cannot be NULL, due to a NOT NULL constraint or
 a strict restriction clause.  Such a column is NULL in the join's output
 only when the relation is null-extended, which tells the two cases apart.
 
-For now only plain tables and joins of them that involve no semijoins or
-antijoins are handled.  The UniqueKeys of base relations are built the first
-time they are needed, so that a query that never needs them does not pay for
-them.
+Semijoins and antijoins are simple: such a join emits each row of its
+left-hand side at most once, whatever its right-hand side holds.  So the
+relations on the right-hand side of a semijoin or antijoin performed within
+the join relation need not be shown to have only one possible row, nor do
+they need UniqueKeys at all.  The one case we do not try to handle is a
+join relation that includes the right-hand side of a semijoin but only part
+of its left-hand side, which can only be formed by making the right-hand
+side unique first.
+
+For now only plain tables and joins of them are handled.  The UniqueKeys of
+base relations are built the first time they are needed, so that a query
+that never needs them does not pay for them.
 
 
 Order of processing for EquivalenceClasses and PathKeys
