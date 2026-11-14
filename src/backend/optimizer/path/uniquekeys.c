@@ -40,9 +40,12 @@
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/planmain.h"
+#include "parser/parsetree.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/lsyscache.h"
 
+static bool rel_is_distinct_for_ecs(PlannerInfo *root, RelOptInfo *rel,
+									Bitmapset *known_ecs, bool nulls_equal);
 static bool joinrel_is_distinct_for_ecs(PlannerInfo *root, RelOptInfo *joinrel,
 										Bitmapset *known_ecs,
 										bool nulls_equal);
@@ -55,9 +58,15 @@ static void build_base_rel_uniquekeys(PlannerInfo *root);
 static void build_base_eclasses(PlannerInfo *root);
 static void build_plain_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel);
 static void build_subquery_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel);
-static void add_subquery_uniquekey(RelOptInfo *rel, Query *subquery,
+static bool add_subquery_uniquekey(RelOptInfo *rel, Query *subquery,
 								   List *distinct_cols, List *col_ecs,
 								   List *const_cols, Bitmapset *colnos);
+static void build_subquery_scanjoin_uniquekeys(PlannerInfo *root,
+											   RelOptInfo *rel,
+											   List *distinct_cols,
+											   List *col_ecs,
+											   List *const_cols);
+static int	find_output_ec_index(PlannerInfo *root, DistinctColInfo *dcinfo);
 static void build_notnull_eclass_indexes(PlannerInfo *root, RelOptInfo *rel);
 static void add_uniquekey(RelOptInfo *rel, Bitmapset *eclass_indexes,
 						  bool null_aware);
@@ -66,8 +75,9 @@ static int	find_ec_index(PlannerInfo *root, RelOptInfo *rel, Expr *expr,
 static Bitmapset *add_base_ec_index(PlannerInfo *root,
 									Bitmapset *eclass_indexes,
 									EquivalenceClass *ec);
-static Expr *get_base_expr(PlannerInfo *root, EquivalenceClass *ec,
-						   RelOptInfo **rel);
+static Expr *get_base_expr(PlannerInfo *root, Expr *expr, RelOptInfo **rel);
+static Expr *get_output_base_expr(PlannerInfo *root, TargetEntry *tle,
+								  RelOptInfo **rel);
 static bool rel_has_uniquekey_in(PlannerInfo *root, RelOptInfo *rel,
 								 Bitmapset *eclass_indexes,
 								 Bitmapset *joined_ecs,
@@ -147,6 +157,69 @@ joinrel_is_distinct_for(PlannerInfo *root, RelOptInfo *joinrel,
 }
 
 /*
+ * subquery_rel_supports_distinctness
+ *		Could the subquery relation possibly be proven distinct by its
+ *		UniqueKeys?
+ *
+ * This is a pre-checking function for subquery_rel_is_distinct_for().
+ */
+bool
+subquery_rel_supports_distinctness(PlannerInfo *root, RelOptInfo *rel)
+{
+	Assert(rel->rtekind == RTE_SUBQUERY);
+
+	/*
+	 * The UniqueKeys of interest follow from the subquery's own relations, so
+	 * the subquery must have been planned.  That also keeps us from building
+	 * UniqueKeys before join removal is done.  Appendrel children have none.
+	 */
+	if (rel->reloptkind != RELOPT_BASEREL || rel->subroot == NULL)
+		return false;
+
+	build_base_rel_uniquekeys(root);
+
+	return rel->uniquekeys != NIL;
+}
+
+/*
+ * subquery_rel_is_distinct_for
+ *		Does the subquery relation return only distinct rows according to
+ *		clause_list?
+ *
+ * clause_list is as for joinrel_is_distinct_for().
+ *
+ * query_is_distinct_for() answers this for a subquery that is distinct by
+ * construction.  Here we use the relation's UniqueKeys, which also cover a
+ * subquery that is distinct because of the relations it is made of.
+ *
+ * If the subquery has LATERAL references, its UniqueKeys hold only within one
+ * scan.  That is good enough, as query_is_distinct_for() also assumes: the
+ * rows that could join to a given row of the other relation all come from the
+ * same scan.
+ */
+bool
+subquery_rel_is_distinct_for(PlannerInfo *root, RelOptInfo *rel,
+							 List *clause_list)
+{
+	Bitmapset  *known_ecs = NULL;
+
+	if (!subquery_rel_supports_distinctness(root, rel))
+		return false;
+
+	foreach_node(RestrictInfo, rinfo, clause_list)
+	{
+		/* caller identified the side belonging to this relation for us */
+		if (rinfo->outer_is_left)
+			known_ecs = add_base_ec_index(root, known_ecs, rinfo->right_ec);
+		else
+			known_ecs = add_base_ec_index(root, known_ecs, rinfo->left_ec);
+	}
+
+	/* The clauses are strict, so rows with NULLs are of no concern */
+	return rel_has_uniquekey_in(root, rel, known_ecs, NULL, false);
+}
+
+/*
  * rel_is_distinct_for_pathkeys
  *		Does the relation return only distinct rows according to the given
  *		pathkeys?
@@ -165,23 +238,40 @@ rel_is_distinct_for_pathkeys(PlannerInfo *root, RelOptInfo *rel,
 {
 	Bitmapset  *known_ecs = NULL;
 
-	if (IS_JOIN_REL(rel))
-	{
-		if (!joinrel_supports_distinctness(root, rel))
-			return false;
-	}
-	else if (rel->reloptkind == RELOPT_BASEREL)
-		build_base_rel_uniquekeys(root);
-	else
-		return false;			/* we know nothing about other relations */
+	/* We know nothing about relations other than these */
+	if (!IS_JOIN_REL(rel) && rel->reloptkind != RELOPT_BASEREL)
+		return false;
+
+	/* add_base_ec_index() needs the ECs that this creates */
+	build_base_rel_uniquekeys(root);
 
 	foreach_node(PathKey, pathkey, pathkeys)
 	{
 		known_ecs = add_base_ec_index(root, known_ecs, pathkey->pk_eclass);
 	}
 
+	return rel_is_distinct_for_ecs(root, rel, known_ecs, nulls_equal);
+}
+
+/*
+ * rel_is_distinct_for_ecs
+ *		Does the base or join relation return only distinct rows according to
+ *		the given set of ECs?
+ *
+ * This is as joinrel_is_distinct_for_ecs(), but accepts a base relation too.
+ */
+static bool
+rel_is_distinct_for_ecs(PlannerInfo *root, RelOptInfo *rel,
+						Bitmapset *known_ecs, bool nulls_equal)
+{
 	if (IS_JOIN_REL(rel))
-		return joinrel_is_distinct_for_ecs(root, rel, known_ecs, nulls_equal);
+		return joinrel_supports_distinctness(root, rel) &&
+			joinrel_is_distinct_for_ecs(root, rel, known_ecs, nulls_equal);
+
+	if (rel->reloptkind != RELOPT_BASEREL)
+		return false;
+
+	build_base_rel_uniquekeys(root);
 
 	return rel_has_uniquekey_in(root, rel, known_ecs, NULL, nulls_equal);
 }
@@ -566,12 +656,16 @@ build_base_eclasses(PlannerInfo *root)
 			!bms_overlap(ec->ec_relids, root->outer_join_rels))
 			continue;
 
-		expr = get_base_expr(root, ec, &rel);
+		/* We can only do this for an EC that is a single expression */
+		if (list_length(ec->ec_members) != 1)
+			continue;
+		em = linitial_node(EquivalenceMember, ec->ec_members);
+
+		expr = get_base_expr(root, em->em_expr, &rel);
 		if (expr == NULL)
 			continue;
 
 		/* This finds the EC if it exists, else creates it */
-		em = linitial_node(EquivalenceMember, ec->ec_members);
 		(void) get_eclass_for_sort_expr(root, expr, ec->ec_opfamilies,
 										em->em_datatype, ec->ec_collation,
 										0, NULL, true);
@@ -583,7 +677,9 @@ build_base_eclasses(PlannerInfo *root)
  *		Build UniqueKeys for a plain relation from its unique indexes.
  *
  * An index column that is in no EC cannot be matched by any clause, so an
- * index having such a column yields no UniqueKey.
+ * index having such a column yields no UniqueKey.  The exception is a column
+ * that a subquery outputs: the outer query can ask about it (see
+ * build_subquery_scanjoin_uniquekeys), so we make an EC for it.
  */
 static void
 build_plain_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel)
@@ -591,8 +687,8 @@ build_plain_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel)
 	List	   *nonnullable_vars = NIL;
 	bool		nonnullable_vars_valid = false;
 
-	/* Short-circuit if no EC mentions this relation */
-	if (rel->eclass_indexes == NULL)
+	/* Short-circuit if no EC mentions this relation, except in a subquery */
+	if (rel->eclass_indexes == NULL && root->parent_root == NULL)
 		return;
 
 	foreach_node(IndexOptInfo, ind, rel->indexlist)
@@ -611,7 +707,9 @@ build_plain_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel)
 		for (c = 0; c < ind->nkeycolumns; c++)
 		{
 			TargetEntry *tle = list_nth_node(TargetEntry, ind->indextlist, c);
+			int			attno = ind->indexkeys[c];
 			EquivalenceClass *ec;
+			List	   *opfamilies;
 			Oid			eq_op;
 			int			ec_index;
 
@@ -627,9 +725,21 @@ build_plain_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel)
 			if (!OidIsValid(eq_op))
 				break;
 
-			ec_index = find_ec_index(root, rel, tle->expr,
-									 get_mergejoin_opfamilies(eq_op),
+			opfamilies = get_mergejoin_opfamilies(eq_op);
+			ec_index = find_ec_index(root, rel, tle->expr, opfamilies,
 									 ind->indexcollations[c]);
+
+			/* In a subquery, make an EC for a column that is only output */
+			if (ec_index < 0 && root->parent_root != NULL && attno > 0 &&
+				bms_is_member(0, rel->attr_needed[attno - rel->min_attr]))
+			{
+				(void) get_eclass_for_sort_expr(root, tle->expr, opfamilies,
+												ind->opcintype[c],
+												ind->indexcollations[c],
+												0, NULL, true);
+				ec_index = find_ec_index(root, rel, tle->expr, opfamilies,
+										 ind->indexcollations[c]);
+			}
 			if (ec_index < 0)
 				break;
 
@@ -652,8 +762,6 @@ build_plain_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel)
 			 */
 			if (null_aware && !ind->nullsnotdistinct)
 			{
-				int			attno = ind->indexkeys[c];
-
 				if (attno == 0)
 					null_aware = false;
 				else if (!bms_is_member(attno, rel->notnullattnums))
@@ -695,6 +803,9 @@ build_plain_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel)
  *
  * Those constructs consider NULLs equal to each other, so the UniqueKeys are
  * null_aware.
+ *
+ * A subquery can also be distinct because of the relations it is made of;
+ * see build_subquery_scanjoin_uniquekeys().
  */
 static void
 build_subquery_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel)
@@ -705,9 +816,6 @@ build_subquery_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel)
 	List	   *const_cols = NIL;
 	Bitmapset  *colnos;
 	int			i = -1;
-
-	if (!query_supports_distinctness(subquery))
-		return;
 
 	/*
 	 * Collect the output columns that are in ECs, in the form that
@@ -762,10 +870,16 @@ build_subquery_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel)
 		}
 	}
 
+	/* Build the UniqueKeys that follow from the subquery's own relations */
+	build_subquery_scanjoin_uniquekeys(root, rel, distinct_cols, col_ecs,
+									   const_cols);
+
+	if (!query_supports_distinctness(subquery))
+		return;
+
 	/* A subquery that returns at most one row needs no columns at all */
-	add_subquery_uniquekey(rel, subquery, distinct_cols, col_ecs, const_cols,
-						   NULL);
-	if (rel->uniquekeys != NIL)
+	if (add_subquery_uniquekey(rel, subquery, distinct_cols, col_ecs,
+							   const_cols, NULL))
 		return;
 
 	/* The DISTINCT columns */
@@ -813,9 +927,10 @@ build_subquery_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel)
  *
  * distinct_cols and col_ecs list the columns that can be used and the ECs
  * they are in.  const_cols lists columns that are equal to constants, which
- * are given in addition.
+ * are given in addition.  Returns true if the subquery is distinct on the
+ * given columns.
  */
-static void
+static bool
 add_subquery_uniquekey(RelOptInfo *rel, Query *subquery,
 					   List *distinct_cols, List *col_ecs,
 					   List *const_cols, Bitmapset *colnos)
@@ -836,8 +951,175 @@ add_subquery_uniquekey(RelOptInfo *rel, Query *subquery,
 		}
 	}
 
-	if (query_is_distinct_for(subquery, cols))
-		add_uniquekey(rel, key_ecs, true);
+	if (!query_is_distinct_for(subquery, cols))
+		return false;
+
+	add_uniquekey(rel, key_ecs, true);
+	return true;
+}
+
+/*
+ * build_subquery_scanjoin_uniquekeys
+ *		Build UniqueKeys for a subquery relation from the UniqueKeys of the
+ *		subquery's own base relations.
+ *
+ * Each row that the subquery emits comes from a row of its scan/join
+ * relation, or from a group of such rows that agree on the output columns
+ * that are not aggregates.  So the subquery is distinct on a set of output
+ * columns if its scan/join relation is.  That holds whatever else the
+ * subquery does, except for set-returning functions in its targetlist and
+ * grouping sets, which can emit a row more than once.
+ *
+ * There is no telling up front which sets of columns the outer query will
+ * ask about.  The useful ones are those that cover a UniqueKey of one of the
+ * subquery's base relations, so we try each of those UniqueKeys whose columns
+ * are all output: if the subquery's scan/join relation is distinct for it,
+ * the ECs of those output columns make a UniqueKey.  If none of them will do
+ * by itself, we try all of them together.
+ *
+ * The parameters are as for add_subquery_uniquekey().
+ */
+static void
+build_subquery_scanjoin_uniquekeys(PlannerInfo *root, RelOptInfo *rel,
+								   List *distinct_cols, List *col_ecs,
+								   List *const_cols)
+{
+	PlannerInfo *subroot = rel->subroot;
+	RelOptInfo *scanjoin_rel;
+	List	   *sub_ecs = NIL;
+	Bitmapset  *const_sub_ecs = NULL;
+	Bitmapset  *all_key_ecs = NULL;
+	Bitmapset  *all_sub_ecs = NULL;
+	int			ncandidates = 0;
+	bool		found = false;
+	int			relid;
+
+	if (subroot == NULL ||
+		subroot->parse->setOperations ||
+		subroot->parse->groupingSets ||
+		subroot->parse->hasTargetSRFs)
+		return;
+
+	/* Find the subquery's scan/join relation */
+	if (bms_get_singleton_member(subroot->all_query_rels, &relid))
+		scanjoin_rel = find_base_rel_noerr(subroot, relid);
+	else
+		scanjoin_rel = find_join_rel(subroot, subroot->all_query_rels);
+	if (scanjoin_rel == NULL)
+		return;
+
+	build_base_rel_uniquekeys(subroot);
+
+	/*
+	 * Find the subquery's EC for each of the columns.  Those of columns that
+	 * the outer query equates to constants are known in every question.
+	 */
+	foreach_ptr(DistinctColInfo, dcinfo, distinct_cols)
+	{
+		sub_ecs = lappend_int(sub_ecs, find_output_ec_index(subroot, dcinfo));
+	}
+	foreach_ptr(DistinctColInfo, dcinfo, const_cols)
+	{
+		int			sub_ec = find_output_ec_index(subroot, dcinfo);
+
+		if (sub_ec >= 0)
+			const_sub_ecs = bms_add_member(const_sub_ecs, sub_ec);
+	}
+
+	relid = -1;
+	while ((relid = bms_next_member(scanjoin_rel->relids, relid)) >= 0)
+	{
+		RelOptInfo *subrel = subroot->simple_rel_array[relid];
+
+		/* ignore the relids of outer joins */
+		if (subrel == NULL)
+			continue;
+
+		foreach_node(UniqueKey, ukey, subrel->uniquekeys)
+		{
+			Bitmapset  *key_ecs = NULL;
+			Bitmapset  *known_ecs;
+			int			i = -1;
+
+			/* Translate the UniqueKey to the ECs of the outer query */
+			while ((i = bms_next_member(ukey->eclass_indexes, i)) >= 0)
+			{
+				ListCell   *lc1;
+				ListCell   *lc2;
+
+				if (bms_is_member(i, const_sub_ecs))
+					continue;
+
+				forboth(lc1, sub_ecs, lc2, col_ecs)
+				{
+					if (lfirst_int(lc1) == i)
+						break;
+				}
+				if (lc1 == NULL)
+					break;
+				key_ecs = bms_add_member(key_ecs, lfirst_int(lc2));
+			}
+
+			/* Skip the UniqueKey if one of its columns is not output */
+			if (i >= 0)
+				continue;
+
+			known_ecs = bms_union(ukey->eclass_indexes, const_sub_ecs);
+
+			if (rel_is_distinct_for_ecs(subroot, scanjoin_rel, known_ecs, true))
+			{
+				add_uniquekey(rel, key_ecs, true);
+				found = true;
+			}
+			else if (rel_is_distinct_for_ecs(subroot, scanjoin_rel, known_ecs,
+											 false))
+			{
+				add_uniquekey(rel, key_ecs, false);
+				found = true;
+			}
+
+			all_key_ecs = bms_add_members(all_key_ecs, key_ecs);
+			all_sub_ecs = bms_add_members(all_sub_ecs, known_ecs);
+			ncandidates++;
+		}
+	}
+
+	/* If no single UniqueKey would do, try them all together */
+	if (!found && ncandidates > 1)
+	{
+		if (rel_is_distinct_for_ecs(subroot, scanjoin_rel, all_sub_ecs, true))
+			add_uniquekey(rel, all_key_ecs, true);
+		else if (rel_is_distinct_for_ecs(subroot, scanjoin_rel, all_sub_ecs,
+										 false))
+			add_uniquekey(rel, all_key_ecs, false);
+	}
+}
+
+/*
+ * find_output_ec_index
+ *		Find the EC that the given output column of the query is in, for use
+ *		by the outer query.
+ *
+ * For a column that is nulled by outer joins, this is the EC of its
+ * un-nulled form, as in add_base_ec_index().  Returns -1 if there is none.
+ */
+static int
+find_output_ec_index(PlannerInfo *root, DistinctColInfo *dcinfo)
+{
+	TargetEntry *tle = get_tle_by_resno(root->processed_tlist, dcinfo->colno);
+	RelOptInfo *rel;
+	Expr	   *expr;
+
+	if (tle == NULL)
+		return -1;
+
+	expr = get_output_base_expr(root, tle, &rel);
+	if (expr == NULL)
+		return -1;
+
+	return find_ec_index(root, rel, expr,
+						 get_mergejoin_opfamilies(dcinfo->opid),
+						 dcinfo->collid);
 }
 
 /*
@@ -978,6 +1260,7 @@ static Bitmapset *
 add_base_ec_index(PlannerInfo *root, Bitmapset *eclass_indexes,
 				  EquivalenceClass *ec)
 {
+	EquivalenceMember *em;
 	RelOptInfo *rel;
 	Expr	   *expr;
 	int			ec_index;
@@ -992,7 +1275,12 @@ add_base_ec_index(PlannerInfo *root, Bitmapset *eclass_indexes,
 	if (!bms_overlap(ec->ec_relids, root->outer_join_rels))
 		return bms_add_member(eclass_indexes, ec->ec_index);
 
-	expr = get_base_expr(root, ec, &rel);
+	/* We can only do this for an EC that is a single expression */
+	if (list_length(ec->ec_members) != 1)
+		return eclass_indexes;
+	em = linitial_node(EquivalenceMember, ec->ec_members);
+
+	expr = get_base_expr(root, em->em_expr, &rel);
 	if (expr == NULL)
 		return eclass_indexes;
 
@@ -1006,44 +1294,61 @@ add_base_ec_index(PlannerInfo *root, Bitmapset *eclass_indexes,
 
 /*
  * get_base_expr
- *		Get the un-nulled form of the expression that the given EC, which
- *		involves outer joins, consists of.  Also return the base relation
- *		the expression belongs to in *rel.
+ *		Get the un-nulled form of the given expression, which is the
+ *		expression itself if it is not nulled by any outer join.  Also return
+ *		the base relation the expression belongs to in *rel.
  *
- * Returns NULL if the EC is not that simple, or if the expression is not
+ * Returns NULL if the expression does not belong to a single base relation.
+ * Also returns NULL if the expression is nulled by outer joins but is not
  * certain to be NULL when the relation is null-extended, in which case the
  * un-nulled form doesn't stand for it.  A Var is always NULL then, and so is
  * a strict expression.
  */
 static Expr *
-get_base_expr(PlannerInfo *root, EquivalenceClass *ec, RelOptInfo **rel)
+get_base_expr(PlannerInfo *root, Expr *expr, RelOptInfo **rel)
 {
-	EquivalenceMember *em;
-	Expr	   *expr;
-	Relids		relids;
+	Relids		relids = pull_varnos(root, (Node *) expr);
+	Expr	   *arg = expr;
 	int			relid;
 
-	if (list_length(ec->ec_members) != 1)
-		return NULL;
-	em = linitial_node(EquivalenceMember, ec->ec_members);
-
-	/* The expression must belong to a single base relation */
-	relids = bms_difference(em->em_relids, root->outer_join_rels);
-	if (!bms_get_singleton_member(relids, &relid))
+	if (!bms_get_singleton_member(bms_difference(relids,
+												 root->outer_join_rels),
+								  &relid))
 		return NULL;
 	*rel = find_base_rel_noerr(root, relid);
 	if (*rel == NULL)
 		return NULL;
 
-	expr = em->em_expr;
-	while (IsA(expr, RelabelType))
-		expr = ((RelabelType *) expr)->arg;
-	if (!IsA(expr, Var) &&
+	if (!bms_overlap(relids, root->outer_join_rels))
+		return expr;
+
+	while (IsA(arg, RelabelType))
+		arg = ((RelabelType *) arg)->arg;
+	if (!IsA(arg, Var) &&
 		contain_nonstrict_functions((Node *) expr))
 		return NULL;
 
-	return (Expr *) remove_nulling_relids((Node *) em->em_expr,
+	return (Expr *) remove_nulling_relids((Node *) expr,
 										  root->outer_join_rels, NULL);
+}
+
+/*
+ * get_output_base_expr
+ *		As get_base_expr(), for an output column of the query.
+ *
+ * Returns NULL for a junk column, and for one that contains aggregates or
+ * window functions: such a column is not computed from a row of a single
+ * base relation.
+ */
+static Expr *
+get_output_base_expr(PlannerInfo *root, TargetEntry *tle, RelOptInfo **rel)
+{
+	if (tle->resjunk ||
+		contain_agg_clause((Node *) tle->expr) ||
+		contain_window_function((Node *) tle->expr))
+		return NULL;
+
+	return get_base_expr(root, tle->expr, rel);
 }
 
 /*

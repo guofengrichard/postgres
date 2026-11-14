@@ -634,6 +634,10 @@ rel_supports_distinctness(PlannerInfo *root, RelOptInfo *rel)
 		/* Check if the subquery has any qualities that support distinctness */
 		if (query_supports_distinctness(subquery))
 			return true;
+
+		/* Else it might be distinct because of the relations it is made of */
+		if (subquery_rel_supports_distinctness(root, rel))
+			return true;
 	}
 	/* We have no proof rules for any other rtekinds. */
 	return false;
@@ -757,6 +761,10 @@ rel_is_distinct_for(PlannerInfo *root, RelOptInfo *rel, List *clause_list,
 		}
 
 		if (query_is_distinct_for(subquery, distinct_cols))
+			return true;
+
+		/* Else see if the subquery's UniqueKeys can prove it */
+		if (subquery_rel_is_distinct_for(root, rel, clause_list))
 			return true;
 	}
 	return false;

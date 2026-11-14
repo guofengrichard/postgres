@@ -224,6 +224,39 @@ explain (costs off)
 select distinct b.id, s.y
 from uk_b b join (select id, x, y from uk_c group by id, x, y) s on b.x = s.x;
 
+-- a subquery is also distinct if the relations within it are
+explain (costs off)
+select distinct a.id, s.id
+from uk_a a join (select id, x from uk_b offset 0) s on a.x = s.x;
+
+explain (costs off)
+select distinct a.id, s.y
+from uk_a a join (select id, x, y from uk_b offset 0) s on a.x = s.x;
+
+explain (costs off)
+select distinct s.id
+from (select b.id, c.y from uk_b b join uk_c c on b.x = c.id offset 0) s;
+
+-- such a subquery can be the unique inner side of a join by itself
+explain (verbose, costs off)
+select * from uk_a a left join (select id, x from uk_b offset 0) s
+  on a.x = s.id;
+
+explain (verbose, costs off)
+select * from uk_a a left join (select id, x from uk_b offset 0) s
+  on a.x = s.x;
+
+-- which can take the keys of several of them
+explain (costs off)
+select distinct s.bid, s.cid
+from (select b.id as bid, c.id as cid
+      from uk_b b join uk_c c on b.y = c.y offset 0) s;
+
+-- and need not be all the grouping columns
+explain (costs off)
+select distinct s.id
+from (select id, x, count(*) from uk_c group by id, x) s;
+
 -- a lateral subquery needs the relations it refers to
 explain (costs off)
 select distinct a.id, s.x

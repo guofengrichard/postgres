@@ -219,6 +219,10 @@ extern bool joinrel_supports_distinctness(PlannerInfo *root,
 										  RelOptInfo *joinrel);
 extern bool joinrel_is_distinct_for(PlannerInfo *root, RelOptInfo *joinrel,
 									List *clause_list);
+extern bool subquery_rel_supports_distinctness(PlannerInfo *root,
+											   RelOptInfo *rel);
+extern bool subquery_rel_is_distinct_for(PlannerInfo *root, RelOptInfo *rel,
+										 List *clause_list);
 extern bool rel_is_distinct_for_pathkeys(PlannerInfo *root, RelOptInfo *rel,
 										 List *pathkeys, bool nulls_equal);
 

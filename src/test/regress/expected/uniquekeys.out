@@ -804,6 +804,120 @@ from uk_b b join (select id, x, y from uk_c group by id, x, y) s on b.x = s.x;
                      ->  Seq Scan on uk_c
 (11 rows)
 
+-- a subquery is also distinct if the relations within it are
+explain (costs off)
+select distinct a.id, s.id
+from uk_a a join (select id, x from uk_b offset 0) s on a.x = s.x;
+           QUERY PLAN           
+--------------------------------
+ Merge Join
+   Merge Cond: (a.x = uk_b.x)
+   ->  Sort
+         Sort Key: a.x
+         ->  Seq Scan on uk_a a
+   ->  Sort
+         Sort Key: uk_b.x
+         ->  Seq Scan on uk_b
+(8 rows)
+
+explain (costs off)
+select distinct a.id, s.y
+from uk_a a join (select id, x, y from uk_b offset 0) s on a.x = s.x;
+                QUERY PLAN                
+------------------------------------------
+ HashAggregate
+   Group Key: a.id, s.y
+   ->  Merge Join
+         Merge Cond: (a.x = s.x)
+         ->  Sort
+               Sort Key: a.x
+               ->  Seq Scan on uk_a a
+         ->  Sort
+               Sort Key: s.x
+               ->  Subquery Scan on s
+                     ->  Seq Scan on uk_b
+(11 rows)
+
+explain (costs off)
+select distinct s.id
+from (select b.id, c.y from uk_b b join uk_c c on b.x = c.id offset 0) s;
+              QUERY PLAN              
+--------------------------------------
+ Subquery Scan on s
+   ->  Hash Join
+         Hash Cond: (b.x = c.id)
+         ->  Seq Scan on uk_b b
+         ->  Hash
+               ->  Seq Scan on uk_c c
+(6 rows)
+
+-- such a subquery can be the unique inner side of a join by itself
+explain (verbose, costs off)
+select * from uk_a a left join (select id, x from uk_b offset 0) s
+  on a.x = s.id;
+                QUERY PLAN                 
+-------------------------------------------
+ Hash Left Join
+   Output: a.id, a.x, a.y, uk_b.id, uk_b.x
+   Inner Unique: true
+   Hash Cond: (a.x = uk_b.id)
+   ->  Seq Scan on public.uk_a a
+         Output: a.id, a.x, a.y
+   ->  Hash
+         Output: uk_b.id, uk_b.x
+         ->  Seq Scan on public.uk_b
+               Output: uk_b.id, uk_b.x
+(10 rows)
+
+explain (verbose, costs off)
+select * from uk_a a left join (select id, x from uk_b offset 0) s
+  on a.x = s.x;
+                QUERY PLAN                 
+-------------------------------------------
+ Merge Left Join
+   Output: a.id, a.x, a.y, uk_b.id, uk_b.x
+   Merge Cond: (a.x = uk_b.x)
+   ->  Sort
+         Output: a.id, a.x, a.y
+         Sort Key: a.x
+         ->  Seq Scan on public.uk_a a
+               Output: a.id, a.x, a.y
+   ->  Sort
+         Output: uk_b.id, uk_b.x
+         Sort Key: uk_b.x
+         ->  Seq Scan on public.uk_b
+               Output: uk_b.id, uk_b.x
+(13 rows)
+
+-- which can take the keys of several of them
+explain (costs off)
+select distinct s.bid, s.cid
+from (select b.id as bid, c.id as cid
+      from uk_b b join uk_c c on b.y = c.y offset 0) s;
+           QUERY PLAN           
+--------------------------------
+ Merge Join
+   Merge Cond: (b.y = c.y)
+   ->  Sort
+         Sort Key: b.y
+         ->  Seq Scan on uk_b b
+   ->  Sort
+         Sort Key: c.y
+         ->  Seq Scan on uk_c c
+(8 rows)
+
+-- and need not be all the grouping columns
+explain (costs off)
+select distinct s.id
+from (select id, x, count(*) from uk_c group by id, x) s;
+          QUERY PLAN          
+------------------------------
+ Subquery Scan on s
+   ->  HashAggregate
+         Group Key: uk_c.id
+         ->  Seq Scan on uk_c
+(4 rows)
+
 -- a lateral subquery needs the relations it refers to
 explain (costs off)
 select distinct a.id, s.x

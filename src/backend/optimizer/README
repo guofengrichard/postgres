@@ -1200,10 +1200,35 @@ too, and gets UniqueKeys if it is distinct by construction, through
 DISTINCT, GROUP BY, a set operation and so on (see query_is_distinct_for).
 A UniqueKey then consists of the ECs of the output columns in question.
 Since those constructs consider NULLs equal, such UniqueKeys are marked
-null_aware.  A relation with LATERAL references is scanned anew for each
-row of the relations it refers to, and its UniqueKeys hold only within one
-scan, so those relations have to be shown to have only one possible row
-first.
+null_aware.
+
+A subquery can also be distinct because of the relations it is made of.
+Each row it emits comes from a row of its own scan/join relation, or from a
+group of such rows, so it is distinct on a set of output columns if its
+scan/join relation is.  Since UniqueKeys are built up front, we cannot wait
+for the outer query to name a set of columns.  Instead we take each
+UniqueKey of the subquery's own base relations whose columns are all
+output, and ask whether the subquery's scan/join relation is distinct for
+it.  If so, the ECs of those output columns in the outer query make a
+UniqueKey of the subquery relation, null_aware or not according to the
+answer.  If no single one will do, they are tried all together, which
+covers a subquery that is a join of relations none of which fixes the
+others.  For this to work, a subquery makes ECs for the unique index
+columns that it outputs but that are in no EC, when it builds its own
+UniqueKeys.
+
+Whether a base relation that is by itself the inner side of a join is unique
+is in general not answered from UniqueKeys: for a plain relation the unique
+indexes are checked directly, which also works before join removal and for
+appendrel children.  A subquery relation is the exception.  If it is not
+distinct by construction, its UniqueKeys are checked, since those are the
+only record of what follows from the subquery's own relations.  That is
+possible only once the subquery has been planned, so it cannot help join
+removal.
+
+A relation with LATERAL references is scanned anew for each row of the
+relations it refers to, and its UniqueKeys hold only within one scan, so
+those relations have to be shown to have only one possible row first.
 
 The right-hand side of a semijoin can itself be asked about.  One way to
 perform a semijoin is to make its right-hand side unique and then do a
