@@ -1212,6 +1212,15 @@ distinct for the values that the semijoin's clauses compare, ignoring rows
 in which those are NULL since such rows cannot match, the paths of the
 right-hand side are used for that as they are.
 
+A DISTINCT step can also follow grouping or window functions in the same
+query.  We keep no UniqueKeys for the relations that represent those steps,
+since what there is to know is simple.  Grouping without grouping sets
+emits one row for each group, so its output is distinct if all the grouping
+columns are among the DISTINCT columns, and it emits at most one row if
+there is no GROUP BY.  Window functions neither add nor remove rows, so
+their output is distinct if the relation below them is distinct for the
+DISTINCT columns (see is_redundant_distinct).
+
 For now only plain tables, subqueries and joins of them are handled.  The UniqueKeys of
 base relations are built the first time they are needed, so that a query
 that never needs them does not pay for them.

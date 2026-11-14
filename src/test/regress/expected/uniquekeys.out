@@ -919,6 +919,74 @@ select distinct id, generate_series(1, 2) from uk_a;
          ->  Seq Scan on uk_a
 (4 rows)
 
+-- DISTINCT over grouped input needs all the grouping columns
+explain (costs off)
+select distinct x, count(*) from uk_a group by x;
+       QUERY PLAN       
+------------------------
+ HashAggregate
+   Group Key: x
+   ->  Seq Scan on uk_a
+(3 rows)
+
+explain (costs off)
+select distinct x, count(*) from uk_a group by x, y;
+          QUERY PLAN          
+------------------------------
+ HashAggregate
+   Group Key: x, count(*)
+   ->  HashAggregate
+         Group Key: x, y
+         ->  Seq Scan on uk_a
+(5 rows)
+
+-- unless there are grouping sets
+explain (costs off)
+select distinct x, count(*) from uk_a group by grouping sets ((x), ());
+          QUERY PLAN          
+------------------------------
+ HashAggregate
+   Group Key: x, count(*)
+   ->  MixedAggregate
+         Hash Key: x
+         Group Key: ()
+         ->  Seq Scan on uk_a
+(6 rows)
+
+-- aggregation without GROUP BY returns one row
+explain (costs off)
+select distinct count(*) from uk_a;
+       QUERY PLAN       
+------------------------
+ Aggregate
+   ->  Seq Scan on uk_a
+(2 rows)
+
+-- window functions do not change the rows of their input
+explain (costs off)
+select distinct id, sum(x) over (partition by y) from uk_a;
+            QUERY PLAN            
+----------------------------------
+ WindowAgg
+   Window: w1 AS (PARTITION BY y)
+   ->  Sort
+         Sort Key: y
+         ->  Seq Scan on uk_a
+(5 rows)
+
+explain (costs off)
+select distinct x, sum(x) over (partition by y) from uk_a;
+               QUERY PLAN               
+----------------------------------------
+ HashAggregate
+   Group Key: x, sum(x) OVER w1
+   ->  WindowAgg
+         Window: w1 AS (PARTITION BY y)
+         ->  Sort
+               Sort Key: y
+               ->  Seq Scan on uk_a
+(7 rows)
+
 --
 -- Test skipping the unique-ification of a semijoin's right-hand side.  We
 -- disable hash and merge joins so that the planner prefers to scan the

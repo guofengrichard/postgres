@@ -261,6 +261,28 @@ select distinct on (id) id, x from uk_a;
 explain (costs off)
 select distinct id, generate_series(1, 2) from uk_a;
 
+-- DISTINCT over grouped input needs all the grouping columns
+explain (costs off)
+select distinct x, count(*) from uk_a group by x;
+
+explain (costs off)
+select distinct x, count(*) from uk_a group by x, y;
+
+-- unless there are grouping sets
+explain (costs off)
+select distinct x, count(*) from uk_a group by grouping sets ((x), ());
+
+-- aggregation without GROUP BY returns one row
+explain (costs off)
+select distinct count(*) from uk_a;
+
+-- window functions do not change the rows of their input
+explain (costs off)
+select distinct id, sum(x) over (partition by y) from uk_a;
+
+explain (costs off)
+select distinct x, sum(x) over (partition by y) from uk_a;
+
 --
 -- Test skipping the unique-ification of a semijoin's right-hand side.  We
 -- disable hash and merge joins so that the planner prefers to scan the
