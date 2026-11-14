@@ -1099,10 +1099,97 @@ join emits has a non-NULL b.u, so the index is as good as one on a NOT NULL
 column.  We apply this to a UniqueKey when each of its ECs has two members
 that can be computed within the join relation.
 
-For now only plain tables and joins of them that involve no outer joins,
-semijoins or antijoins are handled.  The UniqueKeys of base relations are
-built the first time they are needed, so that a query that never needs them
-does not pay for them.
+Outer joins fit into this as follows.  UniqueKeys always describe the rows
+that a base relation really has, and their ECs are those of the relation's
+columns as they are when it is scanned.  In the output of a join relation
+that includes outer joins, a base relation can also be represented by a
+null-extended row.  We simply regard that as one more possible row of the
+relation, so that the procedure above still shows that only one combination
+is possible.  Three things need care:
+
+A question can be about an expression that is nulled by outer joins, such
+as b.y in
+
+	SELECT DISTINCT a.id, b.y FROM a LEFT JOIN b ON a.x = b.z
+
+which is in a different EC than the un-nulled b.y that a UniqueKey would
+use.  We start with the EC of the un-nulled expression instead, creating it
+if there is none.  That is valid because the two are equal wherever the
+nulled one is not NULL.  It is done only for expressions that are certain
+to be NULL when their relation is null-extended, which rules out something
+like COALESCE(b.y, 0).
+
+A left join pairs each row of its left-hand side either with the right-hand
+rows that satisfy the join clauses or with a null-extended row, never with
+both.  So once the left-hand row is fixed, the right-hand ECs that the
+join's clauses equate to the left-hand side are fixed too, as far as there
+are matching rows at all.  Those ECs are therefore treated as fixed from
+the start.  In
+
+	SELECT ... FROM a LEFT JOIN b ON a.x = b.id
+
+with a unique index on b.id, b needs nothing else: a row of a leaves one
+row of b or the null-extended row.  The same is not true of a full join,
+which emits null-extended rows for both sides independently.
+
+For that reason, a UniqueKey of a relation that is nulled by a full join
+leaves two possibilities: the one row that it allows, and the null-extended
+row.  Nothing outside the relation decides between them.  In
+
+	SELECT ... FROM c LEFT JOIN
+	  ((SELECT * FROM a WHERE id = 1) a FULL JOIN
+	   (SELECT * FROM b WHERE id = 1) b ON a.x = b.x)
+	  ON c.x = COALESCE(a.y, b.y)
+
+a and b have at most one row each, yet the full join can emit both a's row
+with b null-extended and b's row with a null-extended, and both can match
+the same row of c.  So for a relation that is nulled by a full join we
+require that one of the fixed ECs have a member of the relation.  A join
+clause on that member is NULL for a null-extended row, so such a row never
+matches.  When NULLs are considered equal, that is not enough; see below.
+
+A left join's clauses are strict too, so they also keep the columns of a
+UniqueKey that is not marked null_aware from being NULL.  In
+
+	SELECT DISTINCT a.id, b.y FROM a LEFT JOIN b ON a.x = b.u
+
+with a unique index on the nullable column b.u, the rows of b that the left
+join matches to a row of a have a non-NULL b.u, while the null-extended row
+is dealt with as described above.  So for this purpose an EC on the
+nullable side of a left-join clause counts like one that has two members
+within the join relation.
+
+Null-extended rows need one more look when NULLs are considered equal.
+In the join's output, a null-extended row of a relation looks the same as a
+row of its own that is NULL in all the columns in question.  So two join
+rows could be equal although they are different combinations of rows.
+
+With a left join this cannot happen.  Consider
+
+	SELECT DISTINCT a.v, b.v FROM a LEFT JOIN b ON a.x = b.w
+
+where a.v and b.v are nullable and each has a NULLS NOT DISTINCT unique
+index.  Two join rows with equal a.v come from the same row of a.  For that
+row of a, the join emits either the rows of b that match it or, if there
+are none, a single null-extended row, but never both.  So there is never a
+join row in which b is null-extended next to one in which b.v is really
+NULL.
+
+A full join is different, because either side can be null-extended.  In
+
+	SELECT DISTINCT a.v, b.v FROM a FULL JOIN b ON a.x = b.w
+
+an unmatched row of a whose a.v is NULL yields (NULL, NULL), and so does an
+unmatched row of b whose b.v is NULL.  To rule that out, for a relation
+that is nulled by a full join the fixed EC that we require must have a
+column of the relation that cannot be NULL, due to a NOT NULL constraint or
+a strict restriction clause.  Such a column is NULL in the join's output
+only when the relation is null-extended, which tells the two cases apart.
+
+For now only plain tables and joins of them that involve no semijoins or
+antijoins are handled.  The UniqueKeys of base relations are built the first
+time they are needed, so that a query that never needs them does not pay for
+them.
 
 
 Order of processing for EquivalenceClasses and PathKeys

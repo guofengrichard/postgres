@@ -14,6 +14,12 @@
  * to each other, so for them only UniqueKeys that hold on those terms can be
  * used.
  *
+ * UniqueKeys always describe the rows that a base relation really has, and
+ * the ECs in them are those of the relation's columns as they are when it is
+ * scanned.  A join relation that includes outer joins can also emit
+ * null-extended rows for its base relations; joinrel_is_distinct_for_ecs()
+ * explains how that is dealt with.
+ *
  * See src/backend/optimizer/README for more information.
  *
  *
@@ -32,22 +38,34 @@
 #include "optimizer/clauses.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
+#include "rewrite/rewriteManip.h"
 #include "utils/lsyscache.h"
 
 static bool joinrel_is_distinct_for_ecs(PlannerInfo *root, RelOptInfo *joinrel,
 										Bitmapset *known_ecs,
 										bool nulls_equal);
-static Bitmapset *get_joined_ecs(PlannerInfo *root, RelOptInfo *joinrel);
+static Bitmapset *get_left_join_ecs(PlannerInfo *root, RelOptInfo *joinrel);
+static Bitmapset *get_joined_ecs(PlannerInfo *root, RelOptInfo *joinrel,
+								 Bitmapset *left_join_ecs);
 static void build_base_rel_uniquekeys(PlannerInfo *root);
+static void build_base_eclasses(PlannerInfo *root);
 static void build_plain_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel);
+static void build_notnull_eclass_indexes(PlannerInfo *root, RelOptInfo *rel);
 static void add_uniquekey(RelOptInfo *rel, Bitmapset *eclass_indexes,
 						  bool null_aware);
 static int	find_ec_index(PlannerInfo *root, RelOptInfo *rel, Expr *expr,
 						  List *opfamilies, Oid collation);
+static Bitmapset *add_base_ec_index(PlannerInfo *root,
+									Bitmapset *eclass_indexes,
+									EquivalenceClass *ec);
+static Expr *get_base_expr(PlannerInfo *root, EquivalenceClass *ec,
+						   RelOptInfo **rel);
 static bool rel_has_uniquekey_in(PlannerInfo *root, RelOptInfo *rel,
 								 Bitmapset *eclass_indexes,
 								 Bitmapset *joined_ecs,
-								 bool nulls_equal);
+								 bool nulls_equal, bool full_nullable);
+static bool rel_has_notnull_column_in(PlannerInfo *root, RelOptInfo *rel,
+									  Bitmapset *eclass_indexes);
 static Bitmapset *get_own_eclass_indexes(PlannerInfo *root, RelOptInfo *rel);
 
 
@@ -65,10 +83,6 @@ joinrel_supports_distinctness(PlannerInfo *root, RelOptInfo *joinrel)
 
 	/* A grouped join rel's rows are not combinations of base rel rows */
 	if (IS_GROUPED_REL(joinrel))
-		return false;
-
-	/* We don't handle join rels that include outer joins */
-	if (bms_overlap(joinrel->relids, root->outer_join_rels))
 		return false;
 
 	build_base_rel_uniquekeys(root);
@@ -94,20 +108,16 @@ joinrel_is_distinct_for(PlannerInfo *root, RelOptInfo *joinrel,
 {
 	Bitmapset  *known_ecs = NULL;
 
+	if (!joinrel_supports_distinctness(root, joinrel))
+		return false;
+
 	foreach_node(RestrictInfo, rinfo, clause_list)
 	{
-		EquivalenceClass *ec;
-
 		/* caller identified the side belonging to this relation for us */
-		ec = rinfo->outer_is_left ? rinfo->right_ec : rinfo->left_ec;
-		if (ec == NULL)
-			continue;
-
-		/* the cached EC might be non-canonical, so chase up to the top */
-		while (ec->ec_merged)
-			ec = ec->ec_merged;
-
-		known_ecs = bms_add_member(known_ecs, ec->ec_index);
+		if (rinfo->outer_is_left)
+			known_ecs = add_base_ec_index(root, known_ecs, rinfo->right_ec);
+		else
+			known_ecs = add_base_ec_index(root, known_ecs, rinfo->left_ec);
 	}
 
 	/* The clauses are strict, so rows with NULLs are of no concern */
@@ -132,21 +142,25 @@ rel_is_distinct_for_pathkeys(PlannerInfo *root, RelOptInfo *rel,
 {
 	Bitmapset  *known_ecs = NULL;
 
+	if (IS_JOIN_REL(rel))
+	{
+		if (!joinrel_supports_distinctness(root, rel))
+			return false;
+	}
+	else if (rel->reloptkind == RELOPT_BASEREL)
+		build_base_rel_uniquekeys(root);
+	else
+		return false;			/* we know nothing about other relations */
+
 	foreach_node(PathKey, pathkey, pathkeys)
 	{
-		known_ecs = bms_add_member(known_ecs, pathkey->pk_eclass->ec_index);
+		known_ecs = add_base_ec_index(root, known_ecs, pathkey->pk_eclass);
 	}
 
 	if (IS_JOIN_REL(rel))
 		return joinrel_is_distinct_for_ecs(root, rel, known_ecs, true);
 
-	/* Otherwise, we only know about base relations */
-	if (rel->reloptkind != RELOPT_BASEREL)
-		return false;
-
-	build_base_rel_uniquekeys(root);
-
-	return rel_has_uniquekey_in(root, rel, known_ecs, NULL, true);
+	return rel_has_uniquekey_in(root, rel, known_ecs, NULL, true, false);
 }
 
 /*
@@ -166,17 +180,40 @@ rel_is_distinct_for_pathkeys(PlannerInfo *root, RelOptInfo *rel,
  * fixes the value of every EC that has a member belonging to it; those ECs
  * are added to the set.  We repeat this until all base relations are
  * accounted for or we can make no more progress.
+ *
+ * If outer joins are performed within the join relation, a base relation can
+ * also be represented in a join row by a null-extended row.  That is just
+ * one more possibility for it, and the above holds as it stands if we take
+ * "row" to include that, provided something decides between a relation's
+ * real row and its null-extended row (see rel_has_uniquekey_in).  The known
+ * ECs are always those of un-nulled expressions, which is what UniqueKeys
+ * consist of; the caller must have translated the ECs of nulled expressions
+ * (see add_base_ec_index).
+ *
+ * A left join pairs each row of its left-hand side either with the
+ * right-hand rows that satisfy the join clauses, or else with a
+ * null-extended row, but never with both.  Hence, once the left-hand row is
+ * fixed, so are the values of the right-hand ECs that the clauses equate to
+ * the left-hand side, for as far as there are matching rows at all.  We
+ * treat those ECs as known from the start.  That is safe because we succeed
+ * only if the left-hand relations get fixed too, and nothing on the
+ * right-hand side can help with that: no EC has un-nulled members on both
+ * sides of a left join.  get_left_join_ecs collects those ECs.
+ *
+ * The caller must have checked joinrel_supports_distinctness().
  */
 static bool
 joinrel_is_distinct_for_ecs(PlannerInfo *root, RelOptInfo *joinrel,
 							Bitmapset *known_ecs, bool nulls_equal)
 {
+	Bitmapset  *left_join_ecs;
 	Bitmapset  *joined_ecs = NULL;
+	Relids		full_join_relids = NULL;
 	Relids		remaining;
 	bool		found;
 
-	if (!joinrel_supports_distinctness(root, joinrel))
-		return false;
+	left_join_ecs = get_left_join_ecs(root, joinrel);
+	known_ecs = bms_add_members(known_ecs, left_join_ecs);
 
 	/*
 	 * When NULLs are considered equal, a UniqueKey that is not null_aware can
@@ -184,10 +221,26 @@ joinrel_is_distinct_for_ecs(PlannerInfo *root, RelOptInfo *joinrel,
 	 * rel_has_uniquekey_in().  So find those ECs.
 	 */
 	if (nulls_equal)
-		joined_ecs = get_joined_ecs(root, joinrel);
+		joined_ecs = get_joined_ecs(root, joinrel, left_join_ecs);
 
-	/* There are no outer joins, so all the relids are base relations */
-	remaining = bms_copy(joinrel->relids);
+	/*
+	 * Relations that are nulled by a full join need extra care; see
+	 * rel_has_uniquekey_in().  So find the full joins performed within the
+	 * join relation.
+	 */
+	if (bms_overlap(joinrel->relids, root->outer_join_rels))
+	{
+		foreach_node(SpecialJoinInfo, sjinfo, root->join_info_list)
+		{
+			if (sjinfo->jointype == JOIN_FULL &&
+				bms_is_member(sjinfo->ojrelid, joinrel->relids))
+				full_join_relids = bms_add_member(full_join_relids,
+												  sjinfo->ojrelid);
+		}
+	}
+
+	/* The relids of outer joins are not relations to account for */
+	remaining = bms_difference(joinrel->relids, root->outer_join_rels);
 
 	do
 	{
@@ -198,9 +251,13 @@ joinrel_is_distinct_for_ecs(PlannerInfo *root, RelOptInfo *joinrel,
 		while ((relid = bms_next_member(remaining, relid)) >= 0)
 		{
 			RelOptInfo *rel = find_base_rel(root, relid);
+			bool		full_nullable;
+
+			/* Is the rel nulled by a full join within this join relation? */
+			full_nullable = bms_overlap(rel->nulling_relids, full_join_relids);
 
 			if (!rel_has_uniquekey_in(root, rel, known_ecs, joined_ecs,
-									  nulls_equal))
+									  nulls_equal, full_nullable))
 				continue;
 
 			remaining = bms_del_member(remaining, relid);
@@ -214,6 +271,42 @@ joinrel_is_distinct_for_ecs(PlannerInfo *root, RelOptInfo *joinrel,
 }
 
 /*
+ * get_left_join_ecs
+ *		Get the indexes of the ECs on the nullable side of the mergejoinable
+ *		clauses of the left joins performed within the join relation.
+ *
+ * See joinrel_is_distinct_for_ecs() for what these are good for.
+ */
+static Bitmapset *
+get_left_join_ecs(PlannerInfo *root, RelOptInfo *joinrel)
+{
+	Bitmapset  *result = NULL;
+
+	if (!bms_overlap(joinrel->relids, root->outer_join_rels))
+		return NULL;
+
+	/* In left_join_clauses, the nullable side is on the right */
+	foreach_node(OuterJoinClauseInfo, ojcinfo, root->left_join_clauses)
+	{
+		if (ojcinfo->sjinfo->jointype == JOIN_LEFT &&
+			bms_is_member(ojcinfo->sjinfo->ojrelid, joinrel->relids))
+			result = add_base_ec_index(root, result,
+									   ojcinfo->rinfo->right_ec);
+	}
+
+	/* In right_join_clauses, the nullable side is on the left */
+	foreach_node(OuterJoinClauseInfo, ojcinfo, root->right_join_clauses)
+	{
+		if (ojcinfo->sjinfo->jointype == JOIN_LEFT &&
+			bms_is_member(ojcinfo->sjinfo->ojrelid, joinrel->relids))
+			result = add_base_ec_index(root, result,
+									   ojcinfo->rinfo->left_ec);
+	}
+
+	return result;
+}
+
+/*
  * get_joined_ecs
  *		Get the indexes of the ECs that join clauses performed within the
  *		join relation keep from being NULL.
@@ -221,20 +314,28 @@ joinrel_is_distinct_for_ecs(PlannerInfo *root, RelOptInfo *joinrel,
  * Join clauses are strict, so an expression that a join clause equates to
  * something is not NULL in any row that passes the clause.  That goes for an
  * EC with two members that can be computed within the join relation, since
- * the join enforces their equality.
+ * the join enforces their equality, and for the ECs on the nullable side of
+ * left-join clauses, which are passed in as left_join_ecs.  (A null-extended
+ * row doesn't pass the clause, but such a row is not one of the relation's
+ * own rows.)
  *
  * This is only of interest for UniqueKeys that are not null_aware, so to
  * save work we look at just the ECs in those.
  */
 static Bitmapset *
-get_joined_ecs(PlannerInfo *root, RelOptInfo *joinrel)
+get_joined_ecs(PlannerInfo *root, RelOptInfo *joinrel,
+			   Bitmapset *left_join_ecs)
 {
 	Bitmapset  *result = NULL;
 	int			relid = -1;
 
 	while ((relid = bms_next_member(joinrel->relids, relid)) >= 0)
 	{
-		RelOptInfo *rel = find_base_rel(root, relid);
+		RelOptInfo *rel;
+
+		if (bms_is_member(relid, root->outer_join_rels))
+			continue;
+		rel = find_base_rel(root, relid);
 
 		foreach_node(UniqueKey, ukey, rel->uniquekeys)
 		{
@@ -250,6 +351,12 @@ get_joined_ecs(PlannerInfo *root, RelOptInfo *joinrel)
 
 				if (bms_is_member(i, result))
 					continue;
+
+				if (bms_is_member(i, left_join_ecs))
+				{
+					result = bms_add_member(result, i);
+					continue;
+				}
 
 				/* The members of a broken EC are not known to be equal */
 				ec = list_nth_node(EquivalenceClass, root->eq_classes, i);
@@ -285,6 +392,7 @@ build_base_rel_uniquekeys(PlannerInfo *root)
 {
 	MemoryContext oldcontext;
 	Relids		no_uniquekey_relids = NULL;
+	Relids		full_join_relids = NULL;
 	int			rti;
 
 	if (root->uniquekeys_built)
@@ -295,6 +403,25 @@ build_base_rel_uniquekeys(PlannerInfo *root)
 
 	/* Be sure to keep the results in the planner_cxt even if within GEQO */
 	oldcontext = MemoryContextSwitchTo(root->planner_cxt);
+
+	/* The UniqueKeys can only use ECs that exist, so do this first */
+	if (root->outer_join_rels != NULL)
+		build_base_eclasses(root);
+
+	/*
+	 * We don't handle semijoins and antijoins.  Rather than checking for them
+	 * in each join relation, treat their right-hand relations as having no
+	 * UniqueKeys.  Also note the full joins, for use below.
+	 */
+	foreach_node(SpecialJoinInfo, sjinfo, root->join_info_list)
+	{
+		if (sjinfo->jointype == JOIN_SEMI || sjinfo->jointype == JOIN_ANTI)
+			no_uniquekey_relids = bms_add_members(no_uniquekey_relids,
+												  sjinfo->syn_righthand);
+		else if (sjinfo->jointype == JOIN_FULL)
+			full_join_relids = bms_add_member(full_join_relids,
+											  sjinfo->ojrelid);
+	}
 
 	for (rti = 1; rti < root->simple_rel_array_size; rti++)
 	{
@@ -307,28 +434,63 @@ build_base_rel_uniquekeys(PlannerInfo *root)
 		/* Currently we only know about plain relations */
 		if (rel->reloptkind == RELOPT_BASEREL &&
 			rel->rtekind == RTE_RELATION)
+		{
 			build_plain_rel_uniquekeys(root, rel);
+
+			/* rel_has_uniquekey_in() needs this for such relations only */
+			if (rel->uniquekeys != NIL &&
+				bms_overlap(rel->nulling_relids, full_join_relids))
+				build_notnull_eclass_indexes(root, rel);
+		}
 
 		if (rel->uniquekeys == NIL)
 			no_uniquekey_relids = bms_add_member(no_uniquekey_relids, rti);
-	}
-
-	/*
-	 * We don't handle semijoins and antijoins.  Rather than checking for them
-	 * in each join relation, treat their right-hand relations as having no
-	 * UniqueKeys.
-	 */
-	foreach_node(SpecialJoinInfo, sjinfo, root->join_info_list)
-	{
-		if (sjinfo->jointype == JOIN_SEMI || sjinfo->jointype == JOIN_ANTI)
-			no_uniquekey_relids = bms_add_members(no_uniquekey_relids,
-												  sjinfo->syn_righthand);
 	}
 
 	root->no_uniquekey_relids = no_uniquekey_relids;
 	root->uniquekeys_built = true;
 
 	MemoryContextSwitchTo(oldcontext);
+}
+
+/*
+ * build_base_eclasses
+ *		Make sure that the un-nulled form of each expression that is nulled
+ *		by outer joins has an EC.
+ *
+ * A column that is only referenced above an outer join that nulls it, say in
+ * DISTINCT or in the clause of an upper join, is only in the EC of its nulled
+ * form.  UniqueKeys need the EC of the column itself, so create that if it
+ * doesn't exist yet.
+ */
+static void
+build_base_eclasses(PlannerInfo *root)
+{
+	int			nclasses = list_length(root->eq_classes);
+
+	/* ECs created here are appended to the list; no need to visit them */
+	for (int i = 0; i < nclasses; i++)
+	{
+		EquivalenceClass *ec = list_nth_node(EquivalenceClass,
+											 root->eq_classes, i);
+		EquivalenceMember *em;
+		RelOptInfo *rel;
+		Expr	   *expr;
+
+		if (ec->ec_has_volatile ||
+			!bms_overlap(ec->ec_relids, root->outer_join_rels))
+			continue;
+
+		expr = get_base_expr(root, ec, &rel);
+		if (expr == NULL)
+			continue;
+
+		/* This finds the EC if it exists, else creates it */
+		em = linitial_node(EquivalenceMember, ec->ec_members);
+		(void) get_eclass_for_sort_expr(root, expr, ec->ec_opfamilies,
+										em->em_datatype, ec->ec_collation,
+										0, NULL, true);
+	}
 }
 
 /*
@@ -437,6 +599,57 @@ build_plain_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel)
 }
 
 /*
+ * build_notnull_eclass_indexes
+ *		Find the ECs that have a member that is a column of the relation that
+ *		cannot be NULL, and save them in rel->notnull_eclass_indexes.
+ *
+ * A column cannot be NULL if it has a NOT NULL constraint or if a strict
+ * restriction clause of the relation filters out the NULLs.
+ */
+static void
+build_notnull_eclass_indexes(PlannerInfo *root, RelOptInfo *rel)
+{
+	List	   *nonnullable_vars = NIL;
+	Bitmapset  *result = NULL;
+	int			i = -1;
+
+	foreach_node(RestrictInfo, rinfo, rel->baserestrictinfo)
+	{
+		nonnullable_vars =
+			mbms_add_members(nonnullable_vars,
+							 find_nonnullable_vars((Node *) rinfo->clause));
+	}
+
+	while ((i = bms_next_member(rel->eclass_indexes, i)) >= 0)
+	{
+		EquivalenceClass *ec = list_nth_node(EquivalenceClass,
+											 root->eq_classes, i);
+
+		foreach_node(EquivalenceMember, em, ec->ec_members)
+		{
+			Var		   *var = (Var *) em->em_expr;
+
+			if (!IsA(var, Var) ||
+				var->varno != rel->relid ||
+				var->varnullingrels != NULL)
+				continue;
+
+			if ((var->varattno > 0 &&
+				 bms_is_member(var->varattno, rel->notnullattnums)) ||
+				mbms_is_member(var->varno,
+							   var->varattno - FirstLowInvalidHeapAttributeNumber,
+							   nonnullable_vars))
+			{
+				result = bms_add_member(result, i);
+				break;
+			}
+		}
+	}
+
+	rel->notnull_eclass_indexes = result;
+}
+
+/*
  * add_uniquekey
  *		Add a UniqueKey for the given set of ECs to the relation, unless it
  *		is redundant.
@@ -506,6 +719,92 @@ find_ec_index(PlannerInfo *root, RelOptInfo *rel, Expr *expr,
 }
 
 /*
+ * add_base_ec_index
+ *		Add the index of the given EC to the given set.  If it is the EC of
+ *		an expression that is nulled by outer joins, add the index of the EC
+ *		of the un-nulled expression instead.
+ *
+ * Wherever the nulled expression is not NULL, it is equal to the un-nulled
+ * one.  Where it is NULL, either the un-nulled one is NULL too or the
+ * relation it belongs to is null-extended; rel_has_uniquekey_in() sees to
+ * that when it matters.
+ *
+ * Nothing is added if the un-nulled expression cannot be identified or has
+ * no EC.  The caller then has less to work with, which is always safe.
+ */
+static Bitmapset *
+add_base_ec_index(PlannerInfo *root, Bitmapset *eclass_indexes,
+				  EquivalenceClass *ec)
+{
+	RelOptInfo *rel;
+	Expr	   *expr;
+	int			ec_index;
+
+	if (ec == NULL)
+		return eclass_indexes;
+
+	/* the given EC might be non-canonical, so chase up to the top */
+	while (ec->ec_merged)
+		ec = ec->ec_merged;
+
+	if (!bms_overlap(ec->ec_relids, root->outer_join_rels))
+		return bms_add_member(eclass_indexes, ec->ec_index);
+
+	expr = get_base_expr(root, ec, &rel);
+	if (expr == NULL)
+		return eclass_indexes;
+
+	ec_index = find_ec_index(root, rel, expr,
+							 ec->ec_opfamilies, ec->ec_collation);
+	if (ec_index < 0)
+		return eclass_indexes;
+
+	return bms_add_member(eclass_indexes, ec_index);
+}
+
+/*
+ * get_base_expr
+ *		Get the un-nulled form of the expression that the given EC, which
+ *		involves outer joins, consists of.  Also return the base relation
+ *		the expression belongs to in *rel.
+ *
+ * Returns NULL if the EC is not that simple, or if the expression is not
+ * certain to be NULL when the relation is null-extended, in which case the
+ * un-nulled form doesn't stand for it.  A Var is always NULL then, and so is
+ * a strict expression.
+ */
+static Expr *
+get_base_expr(PlannerInfo *root, EquivalenceClass *ec, RelOptInfo **rel)
+{
+	EquivalenceMember *em;
+	Expr	   *expr;
+	Relids		relids;
+	int			relid;
+
+	if (list_length(ec->ec_members) != 1)
+		return NULL;
+	em = linitial_node(EquivalenceMember, ec->ec_members);
+
+	/* The expression must belong to a single base relation */
+	relids = bms_difference(em->em_relids, root->outer_join_rels);
+	if (!bms_get_singleton_member(relids, &relid))
+		return NULL;
+	*rel = find_base_rel_noerr(root, relid);
+	if (*rel == NULL)
+		return NULL;
+
+	expr = em->em_expr;
+	while (IsA(expr, RelabelType))
+		expr = ((RelabelType *) expr)->arg;
+	if (!IsA(expr, Var) &&
+		contain_nonstrict_functions((Node *) expr))
+		return NULL;
+
+	return (Expr *) remove_nulling_relids((Node *) em->em_expr,
+										  root->outer_join_rels, NULL);
+}
+
+/*
  * rel_has_uniquekey_in
  *		Does the relation have a UniqueKey that is a subset of the given set
  *		of ECs?
@@ -515,12 +814,30 @@ find_ec_index(PlannerInfo *root, RelOptInfo *rel, Expr *expr,
  * whose ECs are all in joined_ecs, which are those that join clauses keep
  * from being NULL in the rows that the relation contributes to the join
  * relation being considered (see get_joined_ecs).
+ *
+ * full_nullable tells whether the relation is nulled by a full join within
+ * the join relation being considered.  A UniqueKey leaves only one real row
+ * of the relation, but under a full join nothing else decides whether the
+ * relation is represented by that row or by a null-extended row.  (Under a
+ * left join, the left-hand row decides that: the join emits either the
+ * matching right-hand rows or a single null-extended row, never both.)  So
+ * we require one of the given ECs to tell the two apart.  If nulls_equal is
+ * false, any EC with a member of the relation does, since rows that are NULL
+ * in it are ignored.  Otherwise it must have a column of the relation that
+ * cannot be NULL, because a null-extended row looks just like a row of the
+ * relation's own that has NULLs in all the given ECs.
  */
 static bool
 rel_has_uniquekey_in(PlannerInfo *root, RelOptInfo *rel,
 					 Bitmapset *eclass_indexes, Bitmapset *joined_ecs,
-					 bool nulls_equal)
+					 bool nulls_equal, bool full_nullable)
 {
+	if (full_nullable &&
+		!(nulls_equal ?
+		  rel_has_notnull_column_in(root, rel, eclass_indexes) :
+		  bms_overlap(get_own_eclass_indexes(root, rel), eclass_indexes)))
+		return false;
+
 	foreach_node(UniqueKey, ukey, rel->uniquekeys)
 	{
 		bool		broken = false;
@@ -547,6 +864,36 @@ rel_has_uniquekey_in(PlannerInfo *root, RelOptInfo *rel,
 		}
 
 		if (!broken)
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * rel_has_notnull_column_in
+ *		Does any of the given ECs have a member that is a column of the
+ *		relation that cannot be NULL?
+ *
+ * This relies on rel->notnull_eclass_indexes, which is only set up for
+ * relations that are nulled by a full join.
+ */
+static bool
+rel_has_notnull_column_in(PlannerInfo *root, RelOptInfo *rel,
+						  Bitmapset *eclass_indexes)
+{
+	int			i = -1;
+
+	while ((i = bms_next_member(rel->notnull_eclass_indexes, i)) >= 0)
+	{
+		EquivalenceClass *ec;
+
+		if (!bms_is_member(i, eclass_indexes))
+			continue;
+
+		/* An EC can be found to be broken after the set was built */
+		ec = list_nth_node(EquivalenceClass, root->eq_classes, i);
+		if (!ec->ec_broken)
 			return true;
 	}
 
