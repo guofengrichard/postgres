@@ -4,9 +4,13 @@
  *	  Utilities for proving relations distinct using UniqueKeys
  *
  * A UniqueKey is a set of EquivalenceClasses that no two rows of a base
- * relation agree on.  Join relations have no UniqueKeys of their own:
- * whether a join relation is distinct is worked out when needed, from the
- * UniqueKeys of the base relations it consists of.
+ * relation agree on.  Plain relations get them from their unique indexes,
+ * and subquery relations from what makes the subquery distinct.  Join
+ * relations have no UniqueKeys of their own: whether a join relation is
+ * distinct is worked out when needed, from the UniqueKeys of the base
+ * relations it consists of.  Appendrel children and relations that are
+ * partially aggregated by eager aggregation have none either; see
+ * joinrel_is_distinct_for() and grouped_rel_is_distinct_for() for those.
  *
  * There are two kinds of question.  Join clauses are strict, so when matching
  * them we need not care about rows that have NULLs in the columns of
@@ -109,10 +113,6 @@ joinrel_supports_distinctness(PlannerInfo *root, RelOptInfo *joinrel)
 	if (IS_OTHER_REL(joinrel))
 		joinrel = joinrel->top_parent;
 
-	/* A grouped join rel's rows are not combinations of base rel rows */
-	if (IS_GROUPED_REL(joinrel))
-		return false;
-
 	build_base_rel_uniquekeys(root);
 
 	/* If every base rel in the join has a UniqueKey, we can go ahead */
@@ -138,6 +138,16 @@ joinrel_supports_distinctness(PlannerInfo *root, RelOptInfo *joinrel)
  * its outer_is_left flag, and an expression not involving this relation on
  * the other.  Return true if no two rows emitted by the join relation could
  * possibly join to the same row of the other relation.
+ *
+ * The join relation can be a grouped one, in which case we answer for the
+ * ungrouped join relation, which has the same relids.  That is good enough:
+ * each row of the grouped relation stands for a set of rows of the ungrouped
+ * one, the sets do not overlap, and the expressions that the clauses refer to
+ * are grouping expressions, so they have the same values throughout a set.
+ * Hence two rows of the grouped relation that could join to the same row of
+ * the other relation would mean two such rows of the ungrouped one.  As with
+ * grouped_rel_is_distinct_for(), this does not hold for partial paths taken
+ * across workers.
  */
 bool
 joinrel_is_distinct_for(PlannerInfo *root, RelOptInfo *joinrel,
@@ -282,10 +292,11 @@ grouped_rel_supports_distinctness(RelOptInfo *rel)
 	Assert(IS_GROUPED_REL(rel));
 
 	/*
-	 * We only know about a grouped relation whose paths apply the partial
+	 * This proof is only for a grouped relation whose paths apply the partial
 	 * aggregation on top of the ungrouped relation.  Otherwise the paths join
 	 * a grouped relation to an ungrouped one, and can emit a group once for
-	 * each matching row of the latter.
+	 * each matching row of the latter.  (Such a relation can still be proven
+	 * distinct by joinrel_is_distinct_for.)
 	 */
 	return bms_equal(rel->agg_info->apply_agg_at, rel->relids);
 }
@@ -308,6 +319,7 @@ grouped_rel_is_distinct_for(PlannerInfo *root, RelOptInfo *rel,
 {
 	RelAggInfo *agg_info = rel->agg_info;
 	RelOptInfo *top_grouped_rel;
+	List	   *tlist;
 	List	   *pathkeys;
 
 	if (!grouped_rel_supports_distinctness(rel))
@@ -327,8 +339,9 @@ grouped_rel_is_distinct_for(PlannerInfo *root, RelOptInfo *rel,
 		return false;
 
 	/* This leaves out expressions that are known equal to constants */
+	tlist = make_tlist_from_pathtarget(top_grouped_rel->agg_info->target);
 	pathkeys = make_pathkeys_for_sortclauses(root, agg_info->group_clauses,
-											 make_tlist_from_pathtarget(top_grouped_rel->agg_info->target));
+											 tlist);
 
 	foreach_node(PathKey, pathkey, pathkeys)
 	{
@@ -405,10 +418,10 @@ rel_is_distinct_for_ecs(PlannerInfo *root, RelOptInfo *rel,
  * also be represented in a join row by a null-extended row.  That is just
  * one more possibility for it, and the above holds as it stands if we take
  * "row" to include that, provided something decides between a relation's
- * real row and its null-extended row (see rel_has_uniquekey_in).  The known
- * ECs are always those of un-nulled expressions, which is what UniqueKeys
- * consist of; the caller must have translated the ECs of nulled expressions
- * (see add_base_ec_index).
+ * real row and its null-extended row (see full_nullable_rel_is_marked).  The
+ * known ECs are always those of un-nulled expressions, which is what
+ * UniqueKeys consist of; the caller must have translated the ECs of nulled
+ * expressions (see add_base_ec_index).
  *
  * A left join pairs each row of its left-hand side either with the
  * right-hand rows that satisfy the join clauses, or else with a

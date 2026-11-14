@@ -1045,6 +1045,15 @@ terms is marked null_aware; that is the case if the index is NULLS NOT
 DISTINCT, or if each column in the UniqueKey has a NOT NULL constraint or
 is forced to be non-NULL by a strict restriction clause.
 
+The UniqueKeys of base relations are built the first time they are needed,
+so that a query that never needs them does not pay for them.
+
+UniqueKeys are used to detect unique inner sides of joins when the inner
+side is itself a join, to skip DISTINCT and GROUP BY steps whose input is
+already distinct, and to skip making the right-hand side of a semijoin
+unique.  The following describes each of these in turn, and then how outer
+joins, semijoins, subqueries and other kinds of relations fit in.
+
 We do not keep UniqueKeys for join relations.  A join relation would
 typically have many of them, most of which would never be used, and keeping
 only some of them would make the result depend on the order in which the
@@ -1099,13 +1108,22 @@ join emits has a non-NULL b.u, so the index is as good as one on a NOT NULL
 column.  We apply this to a UniqueKey when each of its ECs has two members
 that can be computed within the join relation.
 
+A DISTINCT step can also follow grouping or window functions in the same
+query.  We keep no UniqueKeys for the relations that represent those steps,
+since what there is to know is simple.  Grouping without grouping sets
+emits one row for each group, so its output is distinct if all the grouping
+columns are among the DISTINCT columns, and it emits at most one row if
+there is no GROUP BY.  Window functions neither add nor remove rows, so
+their output is distinct if the relation below them is distinct for the
+DISTINCT columns (see is_redundant_distinct).
+
 Outer joins fit into this as follows.  UniqueKeys always describe the rows
 that a base relation really has, and their ECs are those of the relation's
 columns as they are when it is scanned.  In the output of a join relation
 that includes outer joins, a base relation can also be represented by a
 null-extended row.  We simply regard that as one more possible row of the
 relation, so that the procedure above still shows that only one combination
-is possible.  Three things need care:
+is possible.  Several things need care.
 
 A question can be about an expression that is nulled by outer joins, such
 as b.y in
@@ -1195,6 +1213,13 @@ join relation that includes the right-hand side of a semijoin but only part
 of its left-hand side, which can only be formed by making the right-hand
 side unique first.
 
+The right-hand side of a semijoin can itself be asked about.  One way to
+perform a semijoin is to make its right-hand side unique and then do a
+plain join (see create_unique_paths).  If the right-hand side is already
+distinct for the values that the semijoin's clauses compare, ignoring rows
+in which those are NULL since such rows cannot match, the paths of the
+right-hand side are used for that as they are.
+
 A subquery that could not be flattened into the query is a base relation
 too, and gets UniqueKeys if it is distinct by construction, through
 DISTINCT, GROUP BY, a set operation and so on (see query_is_distinct_for).
@@ -1230,22 +1255,6 @@ A relation with LATERAL references is scanned anew for each row of the
 relations it refers to, and its UniqueKeys hold only within one scan, so
 those relations have to be shown to have only one possible row first.
 
-The right-hand side of a semijoin can itself be asked about.  One way to
-perform a semijoin is to make its right-hand side unique and then do a
-plain join (see create_unique_paths).  If the right-hand side is already
-distinct for the values that the semijoin's clauses compare, ignoring rows
-in which those are NULL since such rows cannot match, the paths of the
-right-hand side are used for that as they are.
-
-A DISTINCT step can also follow grouping or window functions in the same
-query.  We keep no UniqueKeys for the relations that represent those steps,
-since what there is to know is simple.  Grouping without grouping sets
-emits one row for each group, so its output is distinct if all the grouping
-columns are among the DISTINCT columns, and it emits at most one row if
-there is no GROUP BY.  Window functions neither add nor remove rows, so
-their output is distinct if the relation below them is distinct for the
-DISTINCT columns (see is_redundant_distinct).
-
 Appendrel children have no UniqueKeys.  The rows of a child relation are a
 subset of its parent's rows, and the ECs that a question about a child join
 refers to are those of its parent, with the child's expressions as child
@@ -1258,12 +1267,13 @@ UniqueKeys either, but it emits one row for each group, so it is distinct
 for join clauses that cover all its grouping expressions (see
 grouped_rel_is_distinct_for).  That applies only where the aggregation is
 done on top of the ungrouped relation, not where a grouped relation is
-joined to an ungrouped one.  It also holds only for each path by itself:
+joined to an ungrouped one.  Apart from that, a grouped join relation is
+distinct for join clauses if the ungrouped join relation is: each of its
+rows stands for a separate set of rows of the ungrouped one, and the
+clauses can only refer to grouping expressions, which are the same
+throughout such a set.  All this holds only for each path by itself:
 partial paths emit each group once per worker, so a Parallel Hash join must
 not treat a grouped inner relation as unique.
-
-The UniqueKeys of base relations are built the first time they are needed,
-so that a query that never needs them does not pay for them.
 
 
 Order of processing for EquivalenceClasses and PathKeys
