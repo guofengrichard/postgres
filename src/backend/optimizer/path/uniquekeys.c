@@ -40,6 +40,7 @@
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/planmain.h"
+#include "optimizer/tlist.h"
 #include "parser/parsetree.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/lsyscache.h"
@@ -267,6 +268,96 @@ rel_is_distinct_for_pathkeys(PlannerInfo *root, RelOptInfo *rel,
 	}
 
 	return rel_is_distinct_for_ecs(root, rel, known_ecs, nulls_equal);
+}
+
+/*
+ * grouped_rel_supports_distinctness
+ *		Could the grouped relation possibly be proven distinct?
+ *
+ * This is a pre-checking function for grouped_rel_is_distinct_for().
+ */
+bool
+grouped_rel_supports_distinctness(RelOptInfo *rel)
+{
+	Assert(IS_GROUPED_REL(rel));
+
+	/*
+	 * We only know about a grouped relation whose paths apply the partial
+	 * aggregation on top of the ungrouped relation.  Otherwise the paths join
+	 * a grouped relation to an ungrouped one, and can emit a group once for
+	 * each matching row of the latter.
+	 */
+	return bms_equal(rel->agg_info->apply_agg_at, rel->relids);
+}
+
+/*
+ * grouped_rel_is_distinct_for
+ *		Does the grouped relation return only distinct rows according to
+ *		clause_list?
+ *
+ * clause_list is as for joinrel_is_distinct_for().
+ *
+ * Partial aggregation emits one row for each group, so the relation is
+ * distinct if the clauses cover all its grouping expressions.  Note that this
+ * holds for each of the relation's paths, but not for its partial paths taken
+ * across workers, since each worker emits the groups that it sees.
+ */
+bool
+grouped_rel_is_distinct_for(PlannerInfo *root, RelOptInfo *rel,
+							List *clause_list)
+{
+	RelAggInfo *agg_info = rel->agg_info;
+	RelOptInfo *top_grouped_rel;
+	List	   *pathkeys;
+
+	if (!grouped_rel_supports_distinctness(rel))
+		return false;
+
+	/*
+	 * We find the grouping expressions' ECs by way of pathkeys.  For a child
+	 * relation we make them from its parent's expressions, as
+	 * generate_grouped_paths() does; the child's clauses refer to the same
+	 * ECs as the parent's.
+	 */
+	if (!grouping_is_sortable(agg_info->group_clauses))
+		return false;
+
+	top_grouped_rel = IS_OTHER_REL(rel) ? rel->top_parent->grouped_rel : rel;
+	if (top_grouped_rel == NULL)
+		return false;
+
+	/* This leaves out expressions that are known equal to constants */
+	pathkeys = make_pathkeys_for_sortclauses(root, agg_info->group_clauses,
+											 make_tlist_from_pathtarget(top_grouped_rel->agg_info->target));
+
+	foreach_node(PathKey, pathkey, pathkeys)
+	{
+		bool		found = false;
+
+		foreach_node(RestrictInfo, rinfo, clause_list)
+		{
+			EquivalenceClass *ec;
+
+			/* caller identified the side belonging to this relation for us */
+			ec = rinfo->outer_is_left ? rinfo->right_ec : rinfo->left_ec;
+			if (ec == NULL)
+				continue;
+
+			/* the EC might be non-canonical, so chase up to the top */
+			while (ec->ec_merged)
+				ec = ec->ec_merged;
+
+			if (ec == pathkey->pk_eclass && !ec->ec_broken)
+			{
+				found = true;
+				break;
+			}
+		}
+		if (!found)
+			return false;
+	}
+
+	return true;
 }
 
 /*

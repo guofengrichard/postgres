@@ -1253,6 +1253,15 @@ members.  So a child join is distinct if its parent is, and we just ask
 about the parent.  That misses what could be proven from indexes that only
 individual partitions have.
 
+A relation that is partially aggregated by eager aggregation has no
+UniqueKeys either, but it emits one row for each group, so it is distinct
+for join clauses that cover all its grouping expressions (see
+grouped_rel_is_distinct_for).  That applies only where the aggregation is
+done on top of the ungrouped relation, not where a grouped relation is
+joined to an ungrouped one.  It also holds only for each path by itself:
+partial paths emit each group once per worker, so a Parallel Hash join must
+not treat a grouped inner relation as unique.
+
 The UniqueKeys of base relations are built the first time they are needed,
 so that a query that never needs them does not pay for them.
 

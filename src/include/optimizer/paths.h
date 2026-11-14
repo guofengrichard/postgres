@@ -225,6 +225,9 @@ extern bool subquery_rel_is_distinct_for(PlannerInfo *root, RelOptInfo *rel,
 										 List *clause_list);
 extern bool rel_is_distinct_for_pathkeys(PlannerInfo *root, RelOptInfo *rel,
 										 List *pathkeys, bool nulls_equal);
+extern bool grouped_rel_supports_distinctness(RelOptInfo *rel);
+extern bool grouped_rel_is_distinct_for(PlannerInfo *root, RelOptInfo *rel,
+										List *clause_list);
 
 /*
  * pathkeys.c
