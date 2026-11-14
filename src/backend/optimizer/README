@@ -1195,6 +1195,16 @@ join relation that includes the right-hand side of a semijoin but only part
 of its left-hand side, which can only be formed by making the right-hand
 side unique first.
 
+A subquery that could not be flattened into the query is a base relation
+too, and gets UniqueKeys if it is distinct by construction, through
+DISTINCT, GROUP BY, a set operation and so on (see query_is_distinct_for).
+A UniqueKey then consists of the ECs of the output columns in question.
+Since those constructs consider NULLs equal, such UniqueKeys are marked
+null_aware.  A relation with LATERAL references is scanned anew for each
+row of the relations it refers to, and its UniqueKeys hold only within one
+scan, so those relations have to be shown to have only one possible row
+first.
+
 The right-hand side of a semijoin can itself be asked about.  One way to
 perform a semijoin is to make its right-hand side unique and then do a
 plain join (see create_unique_paths).  If the right-hand side is already
@@ -1202,7 +1212,7 @@ distinct for the values that the semijoin's clauses compare, ignoring rows
 in which those are NULL since such rows cannot match, the paths of the
 right-hand side are used for that as they are.
 
-For now only plain tables and joins of them are handled.  The UniqueKeys of
+For now only plain tables, subqueries and joins of them are handled.  The UniqueKeys of
 base relations are built the first time they are needed, so that a query
 that never needs them does not pay for them.
 

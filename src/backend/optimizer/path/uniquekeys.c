@@ -36,8 +36,10 @@
 #include "access/sysattr.h"
 #include "nodes/multibitmapset.h"
 #include "optimizer/clauses.h"
+#include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
+#include "optimizer/planmain.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/lsyscache.h"
 
@@ -52,6 +54,10 @@ static Bitmapset *get_joined_ecs(PlannerInfo *root, RelOptInfo *joinrel,
 static void build_base_rel_uniquekeys(PlannerInfo *root);
 static void build_base_eclasses(PlannerInfo *root);
 static void build_plain_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel);
+static void build_subquery_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel);
+static void add_subquery_uniquekey(RelOptInfo *rel, Query *subquery,
+								   List *distinct_cols, List *col_ecs,
+								   List *const_cols, Bitmapset *colnos);
 static void build_notnull_eclass_indexes(PlannerInfo *root, RelOptInfo *rel);
 static void add_uniquekey(RelOptInfo *rel, Bitmapset *eclass_indexes,
 						  bool null_aware);
@@ -65,7 +71,10 @@ static Expr *get_base_expr(PlannerInfo *root, EquivalenceClass *ec,
 static bool rel_has_uniquekey_in(PlannerInfo *root, RelOptInfo *rel,
 								 Bitmapset *eclass_indexes,
 								 Bitmapset *joined_ecs,
-								 bool nulls_equal, bool full_nullable);
+								 bool nulls_equal);
+static bool full_nullable_rel_is_marked(PlannerInfo *root, RelOptInfo *rel,
+										Bitmapset *eclass_indexes,
+										bool nulls_equal);
 static bool rel_has_notnull_column_in(PlannerInfo *root, RelOptInfo *rel,
 									  Bitmapset *eclass_indexes);
 static Bitmapset *get_own_eclass_indexes(PlannerInfo *root, RelOptInfo *rel);
@@ -174,8 +183,7 @@ rel_is_distinct_for_pathkeys(PlannerInfo *root, RelOptInfo *rel,
 	if (IS_JOIN_REL(rel))
 		return joinrel_is_distinct_for_ecs(root, rel, known_ecs, nulls_equal);
 
-	return rel_has_uniquekey_in(root, rel, known_ecs, NULL, nulls_equal,
-								false);
+	return rel_has_uniquekey_in(root, rel, known_ecs, NULL, nulls_equal);
 }
 
 /*
@@ -249,8 +257,8 @@ joinrel_is_distinct_for_ecs(PlannerInfo *root, RelOptInfo *joinrel,
 
 	/*
 	 * Relations that are nulled by a full join need extra care; see
-	 * rel_has_uniquekey_in().  So find the full joins performed within the
-	 * join relation.
+	 * full_nullable_rel_is_marked().  So find the full joins performed within
+	 * the join relation.
 	 */
 	if (bms_overlap(joinrel->relids, root->outer_join_rels))
 	{
@@ -279,13 +287,23 @@ joinrel_is_distinct_for_ecs(PlannerInfo *root, RelOptInfo *joinrel,
 		while ((relid = bms_next_member(remaining, relid)) >= 0)
 		{
 			RelOptInfo *rel = find_base_rel(root, relid);
-			bool		full_nullable;
 
-			/* Is the rel nulled by a full join within this join relation? */
-			full_nullable = bms_overlap(rel->nulling_relids, full_join_relids);
+			/* A rel nulled by a full join within this join rel needs more */
+			if (bms_overlap(rel->nulling_relids, full_join_relids) &&
+				!full_nullable_rel_is_marked(root, rel, known_ecs,
+											 nulls_equal))
+				continue;
+
+			/*
+			 * A relation with lateral references is scanned anew for each row
+			 * of the relations it refers to, and its UniqueKeys hold only
+			 * within one scan.  So those relations have to come first.
+			 */
+			if (bms_overlap(rel->lateral_relids, remaining))
+				continue;
 
 			if (!rel_has_uniquekey_in(root, rel, known_ecs, joined_ecs,
-									  nulls_equal, full_nullable))
+									  nulls_equal))
 				continue;
 
 			remaining = bms_del_member(remaining, relid);
@@ -492,17 +510,23 @@ build_base_rel_uniquekeys(PlannerInfo *root)
 		if (rel == NULL)
 			continue;
 
-		/* Currently we only know about plain relations */
+		/* Currently we only know about plain relations ... */
 		if (rel->reloptkind == RELOPT_BASEREL &&
 			rel->rtekind == RTE_RELATION)
 		{
 			build_plain_rel_uniquekeys(root, rel);
 
-			/* rel_has_uniquekey_in() needs this for such relations only */
+			/* full_nullable_rel_is_marked() needs this for such rels only */
 			if (rel->uniquekeys != NIL &&
 				bms_overlap(rel->nulling_relids, full_join_relids))
 				build_notnull_eclass_indexes(root, rel);
 		}
+
+		/* ... and subqueries, though not the parents of appendrels */
+		if (rel->reloptkind == RELOPT_BASEREL &&
+			rel->rtekind == RTE_SUBQUERY &&
+			!root->simple_rte_array[rti]->inh)
+			build_subquery_rel_uniquekeys(root, rel);
 
 		if (rel->uniquekeys == NIL)
 			no_uniquekey_relids = bms_add_member(no_uniquekey_relids, rti);
@@ -660,6 +684,163 @@ build_plain_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel)
 }
 
 /*
+ * build_subquery_rel_uniquekeys
+ *		Build UniqueKeys for a subquery relation.
+ *
+ * A subquery can be distinct by construction, through DISTINCT, GROUP BY, a
+ * set operation and so on.  query_is_distinct_for() knows the rules, but it
+ * answers for a given set of output columns.  So we ask it about each set of
+ * columns that could come out distinct that way, and make a UniqueKey of each
+ * set for which it says yes.
+ *
+ * Those constructs consider NULLs equal to each other, so the UniqueKeys are
+ * null_aware.
+ */
+static void
+build_subquery_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel)
+{
+	Query	   *subquery = root->simple_rte_array[rel->relid]->subquery;
+	List	   *distinct_cols = NIL;
+	List	   *col_ecs = NIL;
+	List	   *const_cols = NIL;
+	Bitmapset  *colnos;
+	int			i = -1;
+
+	if (!query_supports_distinctness(subquery))
+		return;
+
+	/*
+	 * Collect the output columns that are in ECs, in the form that
+	 * query_is_distinct_for() wants, along with the ECs they are in.  A
+	 * column that is equal to a constant has the same value in all the rows
+	 * of interest, so it can be given in every question and needs no place in
+	 * a UniqueKey.
+	 */
+	while ((i = bms_next_member(rel->eclass_indexes, i)) >= 0)
+	{
+		EquivalenceClass *ec = list_nth_node(EquivalenceClass,
+											 root->eq_classes, i);
+
+		/* The members of a broken EC are not known to be equal */
+		if (ec->ec_broken || ec->ec_has_volatile)
+			continue;
+
+		foreach_node(EquivalenceMember, em, ec->ec_members)
+		{
+			Var		   *var = (Var *) em->em_expr;
+			DistinctColInfo *dcinfo;
+			Oid			eq_op;
+
+			/* We may ignore any RelabelType node above the Var */
+			if (IsA(var, RelabelType))
+				var = (Var *) ((RelabelType *) var)->arg;
+
+			if (!IsA(var, Var) ||
+				var->varno != rel->relid ||
+				var->varnullingrels != NULL)
+				continue;
+
+			eq_op = get_opfamily_member_for_cmptype(linitial_oid(ec->ec_opfamilies),
+													em->em_datatype,
+													em->em_datatype,
+													COMPARE_EQ);
+			if (!OidIsValid(eq_op))
+				continue;
+
+			dcinfo = palloc_object(DistinctColInfo);
+			dcinfo->colno = var->varattno;
+			dcinfo->opid = eq_op;
+			dcinfo->collid = ec->ec_collation;
+
+			if (ec->ec_has_const)
+				const_cols = lappend(const_cols, dcinfo);
+			else
+			{
+				distinct_cols = lappend(distinct_cols, dcinfo);
+				col_ecs = lappend_int(col_ecs, i);
+			}
+		}
+	}
+
+	/* A subquery that returns at most one row needs no columns at all */
+	add_subquery_uniquekey(rel, subquery, distinct_cols, col_ecs, const_cols,
+						   NULL);
+	if (rel->uniquekeys != NIL)
+		return;
+
+	/* The DISTINCT columns */
+	colnos = NULL;
+	foreach_node(SortGroupClause, sgc, subquery->distinctClause)
+	{
+		TargetEntry *tle = get_sortgroupclause_tle(sgc, subquery->targetList);
+
+		colnos = bms_add_member(colnos, tle->resno);
+	}
+	if (colnos != NULL)
+		add_subquery_uniquekey(rel, subquery, distinct_cols, col_ecs,
+							   const_cols, colnos);
+
+	/* The GROUP BY columns */
+	colnos = NULL;
+	foreach_node(SortGroupClause, sgc, subquery->groupClause)
+	{
+		TargetEntry *tle = get_sortgroupclause_tle(sgc, subquery->targetList);
+
+		colnos = bms_add_member(colnos, tle->resno);
+	}
+	if (colnos != NULL)
+		add_subquery_uniquekey(rel, subquery, distinct_cols, col_ecs,
+							   const_cols, colnos);
+
+	/* All the output columns, for a set operation */
+	if (subquery->setOperations)
+	{
+		colnos = NULL;
+		foreach_node(TargetEntry, tle, subquery->targetList)
+		{
+			if (!tle->resjunk)
+				colnos = bms_add_member(colnos, tle->resno);
+		}
+		add_subquery_uniquekey(rel, subquery, distinct_cols, col_ecs,
+							   const_cols, colnos);
+	}
+}
+
+/*
+ * add_subquery_uniquekey
+ *		Subroutine for build_subquery_rel_uniquekeys: add a UniqueKey for the
+ *		given output columns if the subquery is distinct on them.
+ *
+ * distinct_cols and col_ecs list the columns that can be used and the ECs
+ * they are in.  const_cols lists columns that are equal to constants, which
+ * are given in addition.
+ */
+static void
+add_subquery_uniquekey(RelOptInfo *rel, Query *subquery,
+					   List *distinct_cols, List *col_ecs,
+					   List *const_cols, Bitmapset *colnos)
+{
+	List	   *cols = list_copy(const_cols);
+	Bitmapset  *key_ecs = NULL;
+	ListCell   *lc1;
+	ListCell   *lc2;
+
+	forboth(lc1, distinct_cols, lc2, col_ecs)
+	{
+		DistinctColInfo *dcinfo = lfirst(lc1);
+
+		if (bms_is_member(dcinfo->colno, colnos))
+		{
+			cols = lappend(cols, dcinfo);
+			key_ecs = bms_add_member(key_ecs, lfirst_int(lc2));
+		}
+	}
+
+	if (query_is_distinct_for(subquery, cols))
+		add_uniquekey(rel, key_ecs, true);
+}
+
+/*
  * build_notnull_eclass_indexes
  *		Find the ECs that have a member that is a column of the relation that
  *		cannot be NULL, and save them in rel->notnull_eclass_indexes.
@@ -787,8 +968,8 @@ find_ec_index(PlannerInfo *root, RelOptInfo *rel, Expr *expr,
  *
  * Wherever the nulled expression is not NULL, it is equal to the un-nulled
  * one.  Where it is NULL, either the un-nulled one is NULL too or the
- * relation it belongs to is null-extended; rel_has_uniquekey_in() sees to
- * that when it matters.
+ * relation it belongs to is null-extended; joinrel_is_distinct_for_ecs()
+ * sees to that when it matters.
  *
  * Nothing is added if the un-nulled expression cannot be identified or has
  * no EC.  The caller then has less to work with, which is always safe.
@@ -875,30 +1056,12 @@ get_base_expr(PlannerInfo *root, EquivalenceClass *ec, RelOptInfo **rel)
  * whose ECs are all in joined_ecs, which are those that join clauses keep
  * from being NULL in the rows that the relation contributes to the join
  * relation being considered (see get_joined_ecs).
- *
- * full_nullable tells whether the relation is nulled by a full join within
- * the join relation being considered.  A UniqueKey leaves only one real row
- * of the relation, but under a full join nothing else decides whether the
- * relation is represented by that row or by a null-extended row.  (Under a
- * left join, the left-hand row decides that: the join emits either the
- * matching right-hand rows or a single null-extended row, never both.)  So
- * we require one of the given ECs to tell the two apart.  If nulls_equal is
- * false, any EC with a member of the relation does, since rows that are NULL
- * in it are ignored.  Otherwise it must have a column of the relation that
- * cannot be NULL, because a null-extended row looks just like a row of the
- * relation's own that has NULLs in all the given ECs.
  */
 static bool
 rel_has_uniquekey_in(PlannerInfo *root, RelOptInfo *rel,
 					 Bitmapset *eclass_indexes, Bitmapset *joined_ecs,
-					 bool nulls_equal, bool full_nullable)
+					 bool nulls_equal)
 {
-	if (full_nullable &&
-		!(nulls_equal ?
-		  rel_has_notnull_column_in(root, rel, eclass_indexes) :
-		  bms_overlap(get_own_eclass_indexes(root, rel), eclass_indexes)))
-		return false;
-
 	foreach_node(UniqueKey, ukey, rel->uniquekeys)
 	{
 		bool		broken = false;
@@ -929,6 +1092,33 @@ rel_has_uniquekey_in(PlannerInfo *root, RelOptInfo *rel,
 	}
 
 	return false;
+}
+
+/*
+ * full_nullable_rel_is_marked
+ *		Does one of the given ECs tell whether the relation, which is nulled
+ *		by a full join within the join relation being considered, is
+ *		null-extended?
+ *
+ * Showing that a relation has only one row of its own for the given ECs is
+ * not enough under a full join, as nothing else decides whether the relation
+ * is represented by that row or by a null-extended row.  (Under a left join,
+ * the left-hand row decides that: the join emits either the matching
+ * right-hand rows or a single null-extended row, never both.)  So we require
+ * one of the given ECs to tell the two apart.  If nulls_equal is false, any
+ * EC with a member of the relation does, since rows that are NULL in it are
+ * ignored.  Otherwise it must have a column of the relation that cannot be
+ * NULL, because a null-extended row looks just like a row of the relation's
+ * own that has NULLs in all the given ECs.
+ */
+static bool
+full_nullable_rel_is_marked(PlannerInfo *root, RelOptInfo *rel,
+							Bitmapset *eclass_indexes, bool nulls_equal)
+{
+	if (nulls_equal)
+		return rel_has_notnull_column_in(root, rel, eclass_indexes);
+
+	return bms_overlap(get_own_eclass_indexes(root, rel), eclass_indexes);
 }
 
 /*
