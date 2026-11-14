@@ -93,6 +93,14 @@ select distinct u from uk_n where u > 0;
 explain (costs off)
 select distinct v from uk_n;
 
+-- a column that a join clause equates to something cannot be NULL
+explain (costs off)
+select distinct a.id, n.w from uk_a a join uk_n n on a.x = n.u;
+
+-- but that takes a join clause on each column of the key
+explain (costs off)
+select distinct a.id, n.u from uk_a a join uk_n n on a.x = n.w;
+
 -- GROUP BY without aggregates is handled likewise
 explain (costs off)
 select a.id, a.y from uk_a a join uk_b b on a.x = b.id group by a.id, a.y;

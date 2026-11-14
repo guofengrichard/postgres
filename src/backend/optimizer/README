@@ -1087,6 +1087,18 @@ DISTINCT step is skipped, and so is a grouping step that has no aggregates
 or HAVING clause to evaluate.  (When the scan/join result is a single base
 relation, this is just a matter of finding a suitable UniqueKey.)
 
+A UniqueKey that is not marked null_aware can still be used there if join
+clauses keep its columns from being NULL.  Join clauses are strict, so a
+column that a join clause equates to something is not NULL in any row that
+passes the clause.  In
+
+	SELECT DISTINCT a.id, b.y FROM a JOIN b ON a.x = b.u
+
+with a unique index on the nullable column b.u, every row of b that the
+join emits has a non-NULL b.u, so the index is as good as one on a NOT NULL
+column.  We apply this to a UniqueKey when each of its ECs has two members
+that can be computed within the join relation.
+
 For now only plain tables and joins of them that involve no outer joins,
 semijoins or antijoins are handled.  The UniqueKeys of base relations are
 built the first time they are needed, so that a query that never needs them

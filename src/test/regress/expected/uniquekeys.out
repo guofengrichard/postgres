@@ -262,6 +262,35 @@ select distinct v from uk_n;
  Seq Scan on uk_n
 (1 row)
 
+-- a column that a join clause equates to something cannot be NULL
+explain (costs off)
+select distinct a.id, n.w from uk_a a join uk_n n on a.x = n.u;
+           QUERY PLAN           
+--------------------------------
+ Hash Join
+   Hash Cond: (a.x = n.u)
+   ->  Seq Scan on uk_a a
+   ->  Hash
+         ->  Seq Scan on uk_n n
+(5 rows)
+
+-- but that takes a join clause on each column of the key
+explain (costs off)
+select distinct a.id, n.u from uk_a a join uk_n n on a.x = n.w;
+              QUERY PLAN              
+--------------------------------------
+ HashAggregate
+   Group Key: a.id, n.u
+   ->  Merge Join
+         Merge Cond: (n.w = a.x)
+         ->  Sort
+               Sort Key: n.w
+               ->  Seq Scan on uk_n n
+         ->  Sort
+               Sort Key: a.x
+               ->  Seq Scan on uk_a a
+(10 rows)
+
 -- GROUP BY without aggregates is handled likewise
 explain (costs off)
 select a.id, a.y from uk_a a join uk_b b on a.x = b.id group by a.id, a.y;

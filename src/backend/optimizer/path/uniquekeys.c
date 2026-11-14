@@ -37,6 +37,7 @@
 static bool joinrel_is_distinct_for_ecs(PlannerInfo *root, RelOptInfo *joinrel,
 										Bitmapset *known_ecs,
 										bool nulls_equal);
+static Bitmapset *get_joined_ecs(PlannerInfo *root, RelOptInfo *joinrel);
 static void build_base_rel_uniquekeys(PlannerInfo *root);
 static void build_plain_rel_uniquekeys(PlannerInfo *root, RelOptInfo *rel);
 static void add_uniquekey(RelOptInfo *rel, Bitmapset *eclass_indexes,
@@ -45,6 +46,7 @@ static int	find_ec_index(PlannerInfo *root, RelOptInfo *rel, Expr *expr,
 						  List *opfamilies, Oid collation);
 static bool rel_has_uniquekey_in(PlannerInfo *root, RelOptInfo *rel,
 								 Bitmapset *eclass_indexes,
+								 Bitmapset *joined_ecs,
 								 bool nulls_equal);
 static Bitmapset *get_own_eclass_indexes(PlannerInfo *root, RelOptInfo *rel);
 
@@ -144,7 +146,7 @@ rel_is_distinct_for_pathkeys(PlannerInfo *root, RelOptInfo *rel,
 
 	build_base_rel_uniquekeys(root);
 
-	return rel_has_uniquekey_in(root, rel, known_ecs, true);
+	return rel_has_uniquekey_in(root, rel, known_ecs, NULL, true);
 }
 
 /*
@@ -169,11 +171,20 @@ static bool
 joinrel_is_distinct_for_ecs(PlannerInfo *root, RelOptInfo *joinrel,
 							Bitmapset *known_ecs, bool nulls_equal)
 {
+	Bitmapset  *joined_ecs = NULL;
 	Relids		remaining;
 	bool		found;
 
 	if (!joinrel_supports_distinctness(root, joinrel))
 		return false;
+
+	/*
+	 * When NULLs are considered equal, a UniqueKey that is not null_aware can
+	 * still be used if join clauses keep its ECs from being NULL; see
+	 * rel_has_uniquekey_in().  So find those ECs.
+	 */
+	if (nulls_equal)
+		joined_ecs = get_joined_ecs(root, joinrel);
 
 	/* There are no outer joins, so all the relids are base relations */
 	remaining = bms_copy(joinrel->relids);
@@ -188,7 +199,8 @@ joinrel_is_distinct_for_ecs(PlannerInfo *root, RelOptInfo *joinrel,
 		{
 			RelOptInfo *rel = find_base_rel(root, relid);
 
-			if (!rel_has_uniquekey_in(root, rel, known_ecs, nulls_equal))
+			if (!rel_has_uniquekey_in(root, rel, known_ecs, joined_ecs,
+									  nulls_equal))
 				continue;
 
 			remaining = bms_del_member(remaining, relid);
@@ -199,6 +211,66 @@ joinrel_is_distinct_for_ecs(PlannerInfo *root, RelOptInfo *joinrel,
 	} while (found && remaining != NULL);
 
 	return remaining == NULL;
+}
+
+/*
+ * get_joined_ecs
+ *		Get the indexes of the ECs that join clauses performed within the
+ *		join relation keep from being NULL.
+ *
+ * Join clauses are strict, so an expression that a join clause equates to
+ * something is not NULL in any row that passes the clause.  That goes for an
+ * EC with two members that can be computed within the join relation, since
+ * the join enforces their equality.
+ *
+ * This is only of interest for UniqueKeys that are not null_aware, so to
+ * save work we look at just the ECs in those.
+ */
+static Bitmapset *
+get_joined_ecs(PlannerInfo *root, RelOptInfo *joinrel)
+{
+	Bitmapset  *result = NULL;
+	int			relid = -1;
+
+	while ((relid = bms_next_member(joinrel->relids, relid)) >= 0)
+	{
+		RelOptInfo *rel = find_base_rel(root, relid);
+
+		foreach_node(UniqueKey, ukey, rel->uniquekeys)
+		{
+			int			i = -1;
+
+			if (ukey->null_aware)
+				continue;
+
+			while ((i = bms_next_member(ukey->eclass_indexes, i)) >= 0)
+			{
+				EquivalenceClass *ec;
+				int			nmembers = 0;
+
+				if (bms_is_member(i, result))
+					continue;
+
+				/* The members of a broken EC are not known to be equal */
+				ec = list_nth_node(EquivalenceClass, root->eq_classes, i);
+				if (ec->ec_broken)
+					continue;
+
+				foreach_node(EquivalenceMember, em, ec->ec_members)
+				{
+					if (!em->em_is_const &&
+						bms_is_subset(em->em_relids, joinrel->relids) &&
+						++nmembers >= 2)
+					{
+						result = bms_add_member(result, i);
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	return result;
 }
 
 /*
@@ -438,19 +510,24 @@ find_ec_index(PlannerInfo *root, RelOptInfo *rel, Expr *expr,
  *		Does the relation have a UniqueKey that is a subset of the given set
  *		of ECs?
  *
- * If nulls_equal is true, only UniqueKeys that hold with NULLs considered
- * equal to each other are of use.
+ * If nulls_equal is true, the values of the ECs can be NULL, so only
+ * UniqueKeys that are null_aware are of use.  The exception is a UniqueKey
+ * whose ECs are all in joined_ecs, which are those that join clauses keep
+ * from being NULL in the rows that the relation contributes to the join
+ * relation being considered (see get_joined_ecs).
  */
 static bool
 rel_has_uniquekey_in(PlannerInfo *root, RelOptInfo *rel,
-					 Bitmapset *eclass_indexes, bool nulls_equal)
+					 Bitmapset *eclass_indexes, Bitmapset *joined_ecs,
+					 bool nulls_equal)
 {
 	foreach_node(UniqueKey, ukey, rel->uniquekeys)
 	{
 		bool		broken = false;
 		int			i = -1;
 
-		if (nulls_equal && !ukey->null_aware)
+		if (nulls_equal && !ukey->null_aware &&
+			!bms_is_subset(ukey->eclass_indexes, joined_ecs))
 			continue;
 
 		if (!bms_is_subset(ukey->eclass_indexes, eclass_indexes))
