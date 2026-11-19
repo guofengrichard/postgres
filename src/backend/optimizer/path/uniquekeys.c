@@ -7,8 +7,9 @@
  * relation agree on.  Plain relations get them from their unique indexes.
  * Join relations have no UniqueKeys of their own: whether a join relation is
  * distinct is worked out when needed, from the UniqueKeys of the base
- * relations it consists of.  Appendrel children have none either; see
- * joinrel_is_distinct_for().
+ * relations it consists of.  Appendrel children and relations that are
+ * partially aggregated by eager aggregation have none either; see
+ * joinrel_is_distinct_for() and grouped_rel_is_distinct_for() for those.
  *
  * There are two kinds of question.  Mergejoinable join clauses are assumed
  * to be strict, so when matching them we need not care about rows that have
@@ -40,6 +41,7 @@
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
+#include "optimizer/tlist.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/lsyscache.h"
 
@@ -92,10 +94,6 @@ joinrel_supports_distinctness(PlannerInfo *root, RelOptInfo *joinrel)
 	if (IS_OTHER_REL(joinrel))
 		joinrel = joinrel->top_parent;
 
-	/* A grouped join rel's rows are not combinations of base rel rows */
-	if (IS_GROUPED_REL(joinrel))
-		return false;
-
 	build_base_rel_uniquekeys(root);
 
 	/* If every base rel in the join has a UniqueKey, we can go ahead */
@@ -121,6 +119,11 @@ joinrel_supports_distinctness(PlannerInfo *root, RelOptInfo *joinrel)
  * its outer_is_left flag, and an expression not involving this relation on
  * the other.  Return true if no two rows emitted by the join relation could
  * possibly join to the same row of the other relation.
+ *
+ * For a grouped join relation we answer for the ungrouped one.  That is safe:
+ * each grouped row stands for a separate set of ungrouped rows, and the
+ * clauses refer only to grouping expressions, which are the same throughout
+ * a set.  It does not hold for partial paths taken across workers.
  */
 bool
 joinrel_is_distinct_for(PlannerInfo *root, RelOptInfo *joinrel,
@@ -128,8 +131,7 @@ joinrel_is_distinct_for(PlannerInfo *root, RelOptInfo *joinrel,
 {
 	Bitmapset  *known_ecs = NULL;
 
-	if (!joinrel_supports_distinctness(root, joinrel))
-		return false;
+	build_base_rel_uniquekeys(root);
 
 	/*
 	 * A child join's rows are a subset of its parent's rows, and its clauses
@@ -170,18 +172,12 @@ rel_is_distinct_for_pathkeys(PlannerInfo *root, RelOptInfo *rel,
 {
 	Bitmapset  *known_ecs = NULL;
 
-	if (rel->reloptkind == RELOPT_JOINREL)
-	{
-		if (!joinrel_supports_distinctness(root, rel))
-			return false;
-	}
-	else if (rel->reloptkind == RELOPT_BASEREL)
-	{
-		/* a base rel without UniqueKeys just fails the lookup below */
-		build_base_rel_uniquekeys(root);
-	}
-	else
-		return false;			/* we know nothing about other relations */
+	/* We only know about join relations and base relations */
+	if (rel->reloptkind != RELOPT_JOINREL &&
+		rel->reloptkind != RELOPT_BASEREL)
+		return false;
+
+	build_base_rel_uniquekeys(root);
 
 	foreach_node(PathKey, pathkey, pathkeys)
 	{
@@ -192,6 +188,95 @@ rel_is_distinct_for_pathkeys(PlannerInfo *root, RelOptInfo *rel,
 		return joinrel_is_distinct_for_ecs(root, rel, known_ecs, true);
 
 	return rel_has_uniquekey_in(root, rel, known_ecs, NULL, true);
+}
+
+/*
+ * grouped_rel_supports_distinctness
+ *		Could the grouped relation possibly be proven distinct?
+ *
+ * This is a pre-checking function for grouped_rel_is_distinct_for().
+ */
+bool
+grouped_rel_supports_distinctness(RelOptInfo *rel)
+{
+	Assert(IS_GROUPED_REL(rel));
+
+	/*
+	 * The partial aggregation must be on top of the ungrouped relation.  A
+	 * grouped relation joined to an ungrouped one can emit a group
+	 * repeatedly.
+	 */
+	return bms_equal(rel->agg_info->apply_agg_at, rel->relids);
+}
+
+/*
+ * grouped_rel_is_distinct_for
+ *		Does the grouped relation return only distinct rows according to
+ *		clause_list?
+ *
+ * clause_list is as for joinrel_is_distinct_for().
+ *
+ * Partial aggregation emits one row for each group, so the relation is
+ * distinct if the clauses cover all its grouping expressions.  This does not
+ * hold for partial paths taken across workers.
+ */
+bool
+grouped_rel_is_distinct_for(PlannerInfo *root, RelOptInfo *rel,
+							List *clause_list)
+{
+	RelAggInfo *agg_info = rel->agg_info;
+	RelOptInfo *top_grouped_rel;
+	List	   *tlist;
+	List	   *pathkeys;
+
+	if (!grouped_rel_supports_distinctness(rel))
+		return false;
+
+	/*
+	 * Find the grouping expressions' ECs through pathkeys.  For a child
+	 * relation use its parent's expressions, as generate_grouped_paths()
+	 * does.
+	 */
+	if (!grouping_is_sortable(agg_info->group_clauses))
+		return false;
+
+	top_grouped_rel = IS_OTHER_REL(rel) ? rel->top_parent->grouped_rel : rel;
+	if (top_grouped_rel == NULL)
+		return false;
+
+	/* This leaves out expressions that are known equal to constants */
+	tlist = make_tlist_from_pathtarget(top_grouped_rel->agg_info->target);
+	pathkeys = make_pathkeys_for_sortclauses(root, agg_info->group_clauses,
+											 tlist);
+
+	foreach_node(PathKey, pathkey, pathkeys)
+	{
+		bool		found = false;
+
+		foreach_node(RestrictInfo, rinfo, clause_list)
+		{
+			EquivalenceClass *ec;
+
+			/* caller identified the side belonging to this relation for us */
+			ec = rinfo->outer_is_left ? rinfo->right_ec : rinfo->left_ec;
+			if (ec == NULL)
+				continue;
+
+			/* the EC might be non-canonical, so chase up to the top */
+			while (ec->ec_merged)
+				ec = ec->ec_merged;
+
+			if (ec == pathkey->pk_eclass && !ec->ec_broken)
+			{
+				found = true;
+				break;
+			}
+		}
+		if (!found)
+			return false;
+	}
+
+	return true;
 }
 
 /*
@@ -229,7 +314,7 @@ rel_is_distinct_for_pathkeys(PlannerInfo *root, RelOptInfo *rel,
  * side of such a join performed within the join relation need not be
  * accounted for.  They are found by get_semijoin_rhs_relids.
  *
- * The caller must have checked joinrel_supports_distinctness().
+ * The caller must have built the UniqueKeys of the base relations.
  */
 static bool
 joinrel_is_distinct_for_ecs(PlannerInfo *root, RelOptInfo *joinrel,
@@ -242,6 +327,17 @@ joinrel_is_distinct_for_ecs(PlannerInfo *root, RelOptInfo *joinrel,
 	bool		found;
 
 	if (!get_semijoin_rhs_relids(root, joinrel, &rhs_relids))
+		return false;
+
+	/*
+	 * The relids of outer joins are not relations to account for, and neither
+	 * are the right-hand relations of semijoins and antijoins.
+	 */
+	remaining = bms_difference(joinrel->relids, root->outer_join_rels);
+	remaining = bms_del_members(remaining, rhs_relids);
+
+	/* Give up right away if any of the rest has no UniqueKey */
+	if (bms_overlap(remaining, root->no_uniquekey_relids))
 		return false;
 
 	/*
@@ -268,13 +364,6 @@ joinrel_is_distinct_for_ecs(PlannerInfo *root, RelOptInfo *joinrel,
 												  sjinfo->ojrelid);
 		}
 	}
-
-	/*
-	 * The relids of outer joins are not relations to account for, and neither
-	 * are the right-hand relations of semijoins and antijoins.
-	 */
-	remaining = bms_difference(joinrel->relids, root->outer_join_rels);
-	remaining = bms_del_members(remaining, rhs_relids);
 
 	do
 	{
